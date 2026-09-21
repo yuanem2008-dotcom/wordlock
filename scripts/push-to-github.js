@@ -79,22 +79,30 @@ for (const rel of tracked) {
 }
 console.log(`准备推送 ${files.length} 个文件（不含 .env / data / certs）`);
 
-/* ---------- 3. 建仓库并确保它非空 ---------- */
-const created = await api('/user/repos', {
-  method: 'POST',
-  body: JSON.stringify({
-    name: repoName,
-    description: '给小学生用的英语查词器：设了门槛的字典（输入 N 次 + 跟读评测通过 M 次才给看释义）',
-    private: false,
-    has_issues: false,
-    has_wiki: false,
-    has_projects: false,
-    auto_init: false,
-  }),
-});
-if (created.status === 201) console.log(`已创建公开仓库：${created.data.full_name}`);
-else if (created.status === 422) console.log(`仓库 ${owner}/${repoName} 已存在，继续往里推`);
-else fail(`建仓库失败（HTTP ${created.status}）：${JSON.stringify(created.data).slice(0, 300)}`);
+/* ---------- 3. 仓库：已存在就直接用，不存在才创建 ---------- */
+// 先探测：用「只授权 wordlock 一个仓库、只有 Contents 读写」的细粒度令牌时，
+// 没有「建仓库」权限，所以不能一上来就调建仓库接口。
+const probe = await api(repoPath);
+if (probe.status === 200) {
+  console.log(`仓库 ${owner}/${repoName} 已存在，直接往里推`);
+} else if (probe.status === 404) {
+  const created = await api('/user/repos', {
+    method: 'POST',
+    body: JSON.stringify({
+      name: repoName,
+      description: '给小学生用的英语查词器：设了门槛的字典（输入 N 次 + 跟读评测通过 M 次才给看释义）',
+      private: false,
+      has_issues: false,
+      has_wiki: false,
+      has_projects: false,
+      auto_init: false,
+    }),
+  });
+  if (created.status === 201) console.log(`已创建公开仓库：${created.data.full_name}`);
+  else fail(`建仓库失败（HTTP ${created.status}）：${JSON.stringify(created.data).slice(0, 300)}`);
+} else {
+  fail(`读取仓库失败（HTTP ${probe.status}）：${JSON.stringify(probe.data).slice(0, 300)}`);
+}
 
 // GitHub 的坑：完全空的仓库不允许创建 blob（409 Git Repository is empty），
 // 所以先用 Contents API 放一个占位文件，让仓库有第一个提交。

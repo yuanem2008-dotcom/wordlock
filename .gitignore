@@ -5,5 +5,4 @@ certs/
 .DS_Store
 npm-debug.log*
 .claude/
-REVIEW-PACK.md
 .github-token

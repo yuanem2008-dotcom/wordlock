@@ -14,7 +14,8 @@
     "build-dict": "node scripts/build-dict.js",
     "certs": "node scripts/make-certs.js",
     "try-scorer": "node scripts/try-scorer.js",
-    "review-pack": "node scripts/make-review-pack.js"
+    "review-pack": "node scripts/make-review-pack.js",
+    "push-github": "node scripts/push-to-github.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",

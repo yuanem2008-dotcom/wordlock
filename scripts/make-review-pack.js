@@ -1,8 +1,8 @@
 // 生成「审阅包」：把项目源码合成一个 Markdown 文件，方便上传给线上 AI（Claude / ChatGPT）审阅。
 //
 // 用法：
-//   npm run review-pack            # 核心文件（不含 57KB 的 public/app.js）
-//   npm run review-pack -- --full  # 全量（含 app.js）
+//   npm run review-pack           # 全量（默认）→ docs/REVIEW-PACK.md，供线上 AI 直接读仓库里的这一个文件
+//   npm run review-pack -- --slim # 精简版（不含 57KB 的 public/app.js 与集成测试），适合上传到聊天窗口
 //
 // 安全：只读取下面列出的目录/扩展名；.env、certs/、data/ 一律不读；
 // 生成后还会再扫一遍，若出现疑似密钥就报警并退出。
@@ -12,8 +12,8 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const root = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const full = process.argv.includes('--full');
-const outFile = path.join(root, 'REVIEW-PACK.md');
+const full = !process.argv.includes('--slim'); // 默认全量
+const outFile = path.join(root, 'docs', 'REVIEW-PACK.md');
 
 const INCLUDE_DIRS = ['server', 'public', 'scripts', 'tests'];
 const INCLUDE_FILES = ['README.md', 'AGENTS.md', 'package.json'];
@@ -66,8 +66,10 @@ for (const rel of files) {
 
 const header = `# WordLock 查词器 —— 代码审阅包
 
-> 这是一份可以**直接上传给 AI 助手（Claude / ChatGPT / Gemini）**的单个文件。
+> 这是一份可以**直接上传给 AI 助手，或在仓库里直接读这一个文件**的自包含快照。
 > 上半部分是背景与审阅要求，下半部分是全部源码。请把它当作一次"代码评审"来做。
+>
+> ⚠️ 这是**某一时刻的快照**：判断问题时请以它为准，但若与仓库其它文件冲突，以具体源码文件为准。
 
 ## 你可以这样对 AI 说
 
@@ -105,8 +107,9 @@ const header = `# WordLock 查词器 —— 代码审阅包
 - ${full ? '（本次为全量模式，包含所有源码）' : '为控制体积，本次**未包含** `public/app.js`（界面编排，约 57KB）和 `tests/integration.test.js`（集成测试全文）。如需完整版请让作者运行 `npm run review-pack -- --full`。'}
 `;
 
+fs.mkdirSync(path.dirname(outFile), { recursive: true });
 fs.writeFileSync(outFile, header + parts.join(''), 'utf8');
 console.log(`已生成 ${path.relative(root, outFile)}`);
 console.log(`  包含 ${files.length} 个文件，源码约 ${Math.round(totalBytes / 1024)} KB`);
 console.log(`  文件总大小约 ${Math.round(fs.statSync(outFile).size / 1024)} KB`);
-if (!full) console.log('  提示：加 --full 可以把 public/app.js 和集成测试也打进去');
+if (!full) console.log('  提示：默认是全量版，去掉 --slim 即可');

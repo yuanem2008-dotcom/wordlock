@@ -59,7 +59,12 @@ npm run start:https    # HTTPS（iPad 用麦克风时需要，先 npm run certs�
 npm test               # 102 个测试（单元 + 进程内集成）
 npm run build-dict     # 由 data/raw 的 ECDICT 重建 data/dict.db（约 35 秒）
 npm run try-scorer     # 用 macOS say 合成人声送真实评测，验证密钥与计分是否正常
+npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（单文件源码快照，供外部 AI 审阅）
+npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时用，需 .github-token）
 ```
+
+> **只读一个文件就能拿到全部源码**：`docs/REVIEW-PACK.md`（自包含快照，含背景说明与
+> 全部源码）。抓取 GitHub 目录页失败时，直接读这个文件即可，不必逐个找源文件。
 
 ## 欢迎重点审阅的地方
 
