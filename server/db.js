@@ -48,10 +48,12 @@ export function openUserDb() {
       session_id  TEXT NOT NULL,
       word        TEXT,
       mode        TEXT NOT NULL DEFAULT 'en',
+      typing_count INTEGER NOT NULL DEFAULT 0,
       typing_done INTEGER NOT NULL DEFAULT 0,
       read_pass   INTEGER NOT NULL DEFAULT 0,
       read_fail   INTEGER NOT NULL DEFAULT 0,
       read_attempts INTEGER NOT NULL DEFAULT 0,
+      best_score  INTEGER NOT NULL DEFAULT 0,
       assisted    INTEGER NOT NULL DEFAULT 0,
       quick_peek  INTEGER NOT NULL DEFAULT 0,
       meaning_shown INTEGER NOT NULL DEFAULT 0,
@@ -81,6 +83,24 @@ export function openUserDb() {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    -- 首次校准的分数样本：只由服务端写，客户端无法伪造（防止故意压低分数线）
+    CREATE TABLE IF NOT EXISTS calibration_samples (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id INTEGER NOT NULL,
+      ts         TEXT NOT NULL,
+      score      INTEGER NOT NULL,
+      clean      INTEGER NOT NULL DEFAULT 1
+    );
   `);
+  // 并发加固：多设备（电脑 + iPad）同时用时不至于因锁竞争直接抛错
+  db.pragma('busy_timeout = 5000');
+  // 老库升级：老版本的 learn_sessions 没有这两列
+  addColumnIfMissing(db, 'learn_sessions', 'typing_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'learn_sessions', 'best_score', 'INTEGER NOT NULL DEFAULT 0');
   return db;
+}
+
+function addColumnIfMissing(db, table, column, definition) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }

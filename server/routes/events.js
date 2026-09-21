@@ -1,9 +1,22 @@
-// 查词事件记录（需求 2.10）。某些事件同时推进会话进度（阶段 3 的校验依据）。
+// 查词事件记录（需求 2.10）——**只记录，不授权**。
+//
+// 安全不变量：这个接口从前端接收数据，所以它绝不能改变任何门禁状态。
+// 以前它会在收到 help_used 时直接把词判为「已学会」，等于让孩子自报「我用过求助了」
+// 就能看到释义（实测可绕过）。现在：
+//   - 会不会放行，只由 /api/session、/api/typing、/api/score、/api/help、/api/quick-peek
+//     这些服务端能核实真实动作的接口决定；
+//   - 这里只往 events 表写一行日志，供家长模式看记录与「放弃点」统计。
 
 import { Router } from 'express';
-import { applyEventToSession, getSession, upsertSession } from '../sessions.js';
-import { getProfileBundle } from '../settings.js';
-import { graduateWord } from '../vocab.js';
+
+// 这些事件不涉及任何放行，允许客户端上报（都是"孩子做了什么"的观察值）
+const CLIENT_REPORTABLE = new Set([
+  'lookup_start',
+  'not_found',
+  'cancel',
+  'network_error',
+  'quick_peek_request', // 只是"点了按钮"的记录；真正的放行看 /api/quick-peek
+]);
 
 export function createEventsRouter(userDb) {
   const router = Router();
@@ -20,39 +33,22 @@ export function createEventsRouter(userDb) {
       for (const e of list) {
         const type = typeof e.type === 'string' ? e.type.slice(0, 64) : '';
         if (!type) continue;
-        const word = typeof e.word === 'string' ? e.word.slice(0, 64) : null;
-        const sid = typeof e.sessionId === 'string' ? e.sessionId.slice(0, 64) : null;
+        // 服务端负责的门禁事件不接受客户端上报（避免重复计数，也避免被伪造利用）
+        if (!CLIENT_REPORTABLE.has(type)) continue;
         insert.run(
           profileId,
           ts,
-          sid,
+          typeof e.sessionId === 'string' ? e.sessionId.slice(0, 64) : null,
           e.mode === 'zh' ? 'zh' : 'en',
-          word,
+          typeof e.word === 'string' ? e.word.slice(0, 64) : null,
           typeof e.step === 'string' ? e.step.slice(0, 32) : null,
           type,
           e.detail == null ? null : JSON.stringify(e.detail)
         );
-        applyEventToSession(userDb, profileId, {
-          session_id: sid,
-          type,
-          word,
-          mode: e.mode === 'zh' ? 'zh' : 'en',
-        });
-
-        // 求助通关：立即写入生词本（assisted，之后会重点复习）
-        if (type === 'help_used' && word && sid) {
-          const bundle = getProfileBundle(userDb, req.profile);
-          const session = getSession(userDb, profileId, sid);
-          graduateWord(userDb, profileId, word, {
-            settings: bundle.settings,
-            assisted: true,
-            readAttempts: session?.read_attempts ?? 0,
-          });
-        }
       }
     });
     run();
-    res.json({ ok: true });
+    res.json({ ok: true, recorded: true });
   });
 
   return router;

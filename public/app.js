@@ -1,7 +1,13 @@
 // WordLock 界面与流程（阶段 1～6）。
 // 流程：档案 → 输入 N 次（英文/中文入口）→ 读音 → 跟读 M 次 → 释义 → 生词本/复习。
 
-import { createTypingSession, createReadingSession } from './state-machine.js';
+import {
+  createTypingSession,
+  createReadingSession,
+  MSG_INVALID,
+  MSG_LENGTH,
+  positionMessage,
+} from './state-machine.js';
 import { unlockTTS, speakWord, listEnglishVoices } from './tts.js';
 import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js';
 import { createRecorder } from './audio-record.js';
@@ -270,19 +276,12 @@ async function submitInput() {
   input.value = '';
   if (!raw.trim()) return;
 
-  // 待巩固流程：目标已定，照抄输入
-  if (state.session.isAwaitingFirst() && state.learn?.consolidate) {
-    applyResult(state.session.nextInput(raw));
-    return;
-  }
-
   // 含汉字 → 中文入口（需求 2.0）
   if (state.session.isAwaitingFirst() && state.session.getState().mode === 'en' && /[一-鿿]/.test(raw)) {
     await searchChinese(raw.trim());
     return;
   }
 
-  const awaitingFirst = state.session.isAwaitingFirst();
   const precheck = state.session.prepare(raw);
   if (!precheck.ok) {
     showFeedback(precheck.message, false);
@@ -290,78 +289,122 @@ async function submitInput() {
     return;
   }
 
-  if (awaitingFirst) {
-    if (!state.lookupStarted) {
-      state.lookupStarted = true;
-      logEvents([{ type: 'lookup_start', word: precheck.word }]);
-    }
-    try {
-      const dictResult = await api('/api/check-word', {
-        method: 'POST',
-        body: JSON.stringify({
-          word: precheck.word,
-          suggest: state.session.getState().notFoundStreak >= 1,
-        }),
-      });
-      if (dictResult.exists && !dictResult.allowed) {
-        showFeedback('今天的词已经查够啦，明天再来', false);
-        playGentleSound(soundOn());
-        return;
-      }
-      const result = state.session.firstInput(raw, dictResult);
-      if (dictResult.exists && dictResult.learned) {
-        // 已学会的词免门槛（需求 2.8）
-        state.session.cancel();
-        await showLearned(dictResult.word);
-        return;
-      }
-      if (dictResult.exists && !state.session.isAwaitingFirst()) {
-        state.targetWord = dictResult.word;
-        state.learn = { word: dictResult.word, entryMode: 'en', consolidate: false };
-        maybeShowPeek();
-      }
-      applyResult(result);
-    } catch (err) {
-      showFeedback(err.userMessage || '出了点小状况，请再试一次', false);
-    }
+  if (state.session.isAwaitingFirst()) {
+    await firstLookup(precheck.word, raw);
+    return;
+  }
+  await submitTyping(raw);
+}
+
+// 把当前会话绑定到目标词（服务端记账的唯一入口）
+async function bindSession(word, mode) {
+  try {
+    return await api('/api/session', {
+      method: 'POST',
+      session: true,
+      body: JSON.stringify({ sessionId: state.sessionId, word, mode }),
+    });
+  } catch (err) {
+    showFeedback(err.userMessage || '出了点小状况，请重新开始查这个词', false);
+    return null;
+  }
+}
+
+// 英文入口第 1 次输入：先查词典；命中后由服务端绑定会话并计第 1 次
+async function firstLookup(word, raw) {
+  if (!state.lookupStarted) {
+    state.lookupStarted = true;
+    logEvents([{ type: 'lookup_start', word }]);
+  }
+  let dictResult;
+  try {
+    dictResult = await api('/api/check-word', {
+      method: 'POST',
+      body: JSON.stringify({
+        word,
+        suggest: state.session.getState().notFoundStreak >= 1,
+      }),
+    });
+  } catch (err) {
+    showFeedback(err.userMessage || '出了点小状况，请再试一次', false);
     return;
   }
 
-  applyResult(state.session.nextInput(raw));
-}
-
-function applyResult(result) {
-  logEvents(result.events);
-
-  if (result.status === 'not_found') {
+  // 本地状态机只负责"找不到的连击"和相近词提示，不决定放行
+  const result = state.session.firstInput(raw, dictResult);
+  if (!dictResult.exists) {
+    logEvents(result.events);
     showFeedback(result.message, false);
     playGentleSound(soundOn());
     showSuggestions(result.suggestions);
     return;
   }
-  hideSuggestions();
-
-  if (result.status === 'invalid' || result.status === 'wrong') {
-    showFeedback(result.message, false);
+  if (dictResult.learned) {
+    state.session.cancel();
+    await showLearned(dictResult.word);
+    return;
+  }
+  if (!dictResult.allowed) {
+    showFeedback('今天的词已经查够啦，明天再来', false);
     playGentleSound(soundOn());
     return;
   }
+  hideSuggestions();
 
-  if (result.status === 'progress') {
-    renderProgress(result.completed);
-    showFeedback(CHEERS[state.cheerIndex++ % CHEERS.length], true);
-    playStepSound(soundOn());
-    $('input-word').focus();
-    return;
-  }
-
-  if (result.status === 'done') {
-    state.targetWord = result.target;
-    renderProgress(result.completed);
+  state.targetWord = dictResult.word;
+  state.learn = { word: dictResult.word, entryMode: 'en', consolidate: false };
+  const bound = await bindSession(dictResult.word, 'en');
+  if (!bound) return;
+  maybeShowPeek();
+  if (bound.done) {
+    renderProgress(bound.completed);
     showFeedback('输入完成！', true);
     playSuccessSound(soundOn());
     openPronunciation();
+  } else {
+    renderProgress(bound.completed);
+    showFeedback(CHEERS[state.cheerIndex++ % CHEERS.length], true);
+    playStepSound(soundOn());
+    $('input-word').focus();
   }
+}
+
+// 后续每次输入：由服务端比对与计数（客户端说的不算数）
+async function submitTyping(raw) {
+  let r;
+  try {
+    r = await api('/api/typing', {
+      method: 'POST',
+      session: true,
+      body: JSON.stringify({ sessionId: state.sessionId, typed: raw }),
+    });
+  } catch (err) {
+    showFeedback(err.userMessage || '出了点小状况，请再试一次', false);
+    return;
+  }
+
+  if (r.ok) {
+    if (r.done) {
+      renderProgress(r.completed);
+      showFeedback('输入完成！', true);
+      playSuccessSound(soundOn());
+      openPronunciation();
+    } else {
+      renderProgress(r.completed);
+      showFeedback(CHEERS[state.cheerIndex++ % CHEERS.length], true);
+      playStepSound(soundOn());
+      $('input-word').focus();
+    }
+    return;
+  }
+  if (r.reason === 'invalid_chars') {
+    showFeedback(MSG_INVALID, false);
+  } else if (r.reason === 'mismatch') {
+    showFeedback(r.hint === 'length' ? MSG_LENGTH : positionMessage(r.position), false);
+  } else {
+    showFeedback('再看看这个词吧', false);
+  }
+  playGentleSound(soundOn());
 }
 
 function soundOn() {
@@ -453,6 +496,8 @@ function pickCandidate(item) {
   maybeShowPeek();
   showView('view-main');
   $('input-word').focus();
+  // 中文入口从 0/N 开始，由服务端绑定目标词（服务端自己查词典确认存在）
+  bindSession(state.targetWord, 'zh').catch(() => {});
 }
 
 function backFromZhTyping() {
@@ -598,8 +643,10 @@ function beginReading(word) {
   setTimeout(() => speak(word), 1200);
 }
 
-function renderReadingProgress() {
-  const m = state.reading.getState().requiredCount;
+function renderReadingProgress(passes, required) {
+  const st = state.reading.getState();
+  const m = required ?? st.requiredCount;
+  const done = passes ?? st.passes;
   const dots = $('reading-dots');
   if (dots.childElementCount !== m) {
     dots.textContent = '';
@@ -609,10 +656,9 @@ function renderReadingProgress() {
       dots.append(d);
     }
   }
-  const st = state.reading.getState();
-  [...dots.children].forEach((d, i) => d.classList.toggle('on', i < st.passes));
+  [...dots.children].forEach((d, i) => d.classList.toggle('on', i < done));
   $('reading-progress-text').textContent =
-    st.readingMode === 'streak' ? `连续通过 ${st.passes}/${st.requiredCount}` : `通过 ${st.passes}/${st.requiredCount}`;
+    st.readingMode === 'streak' ? `连续通过 ${done}/${m}` : `通过 ${done}/${m}`;
 }
 
 function starString(n) {
@@ -712,9 +758,13 @@ function handleScoreResult(res, word) {
     return;
   }
 
-  const rs = state.reading.recordAttempt({ score: res.score, passed: res.passed });
-  $('reading-stars').textContent = starString(rs.stars);
-  renderReadingProgress();
+  // 次数与能否求助都以服务端返回为准（客户端说的不算数）
+  const passes = res.passes ?? 0;
+  const required = res.requiredCount ?? state.bundle.readingCount;
+  const passedNow = Boolean(res.passed);
+  $('reading-stars').textContent = starString(passedNow ? (res.score >= Math.min(100, s.passScore + 15) ? 3 : 2) : 1);
+  renderReadingProgress(passes, required);
+  const rs = { status: passedNow ? (passes >= required ? 'done' : 'pass') : 'fail', canHelp: Boolean(res.canHelp) };
   if (rs.status === 'done') {
     showFeedback('读得真棒！', true, 'feedback-reading');
     playSuccessSound(soundOn());
@@ -734,6 +784,8 @@ function handleScoreResult(res, word) {
 /* ---------- 首次校准（阶段 2） ---------- */
 
 function startCalibration(nextWord) {
+  // 分数由服务端记录，客户端不上报任何分数
+  api('/api/calibration/start', { method: 'POST', session: true }).catch(() => {});
   state.calibration = { words: CALIBRATION_WORDS, idx: 0, scores: [], nextWord };
   state.reading = createReadingSession({ requiredCount: 1, passScore: 0, helpAfterFails: 99 });
   $('reading-title').textContent = '先试一试';
@@ -751,15 +803,16 @@ function startCalibration(nextWord) {
 }
 
 async function finishCalibration() {
-  const scores = state.calibration.scores;
+  const spokeAnything = state.calibration.scores.length > 0;
   const nextWord = state.calibration.nextWord;
   state.calibration = null;
   try {
-    if (scores.length) {
-      await api('/api/calibration', { method: 'POST', body: JSON.stringify({ scores }) });
-    } else {
-      await api('/api/calibration', { method: 'POST', body: JSON.stringify({ skipped: true }) });
-    }
+    // 只告诉服务端"试着读完了"；分数线由服务端按自己记录的分数算（客户端无法伪造）
+    await api('/api/calibration/finish', {
+      method: 'POST',
+      session: true,
+      body: JSON.stringify({ skipped: !spokeAnything }),
+    });
     state.bundle = await api('/api/settings');
     showFeedback('准备好啦！', true, 'feedback-reading');
     setTimeout(() => beginReading(nextWord), 1000);
@@ -861,6 +914,8 @@ function startConsolidation() {
   renderProgress(0);
   showView('view-main');
   $('input-word').focus();
+  // 待巩固也走服务端绑定：目标词由服务端确认存在，输入次数由服务端数
+  bindSession(item.word, 'zh').catch(() => {});
 }
 
 // 巩固流程读音通关后由 score 路由转正；这里轮询确认后弹出下一个
@@ -1500,12 +1555,21 @@ function bind() {
   $('btn-mic').addEventListener('click', toggleMic);
   $('btn-hear-standard').addEventListener('click', () => speak(state.targetWord));
   $('btn-help').addEventListener('click', () => {
-    const rs = state.reading.useHelp();
-    if (rs.status === 'done') {
-      logEvents([{ type: 'help_used', word: state.targetWord }], { step: 'reading' });
-      showFeedback('好，这次先帮你打开，之后要重点复习哦', true, 'feedback-reading');
-      setTimeout(() => openMeaning(), 800);
-    }
+    // 是否允许求助由服务端判定（读不够次数会被拒）
+    api('/api/help', {
+      method: 'POST',
+      session: true,
+      body: JSON.stringify({ word: state.targetWord, sessionId: state.sessionId }),
+    })
+      .then(() => {
+        $('btn-help').hidden = true;
+        showFeedback('好，这次先帮你打开，之后要重点复习哦', true, 'feedback-reading');
+        setTimeout(() => openMeaning(), 800);
+      })
+      .catch((err) => {
+        $('btn-help').hidden = true;
+        showFeedback(err.userMessage || '再多试几次吧', false, 'feedback-reading');
+      });
   });
   $('btn-dev-score').addEventListener('click', () => {
     submitScore({ mockScore: Number($('dev-score').value) });

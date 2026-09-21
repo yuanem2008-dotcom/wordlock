@@ -77,7 +77,8 @@
 | `server/app.js` | 路由装配（集成测试也从这里起 app）、启动时打印评测实现与配置状态 |
 | `server/db.js` | 两个库：`data/dict.db`（词典，只读）、`data/user.db`（档案/事件/生词本/会话） |
 | `server/settings.js` | 档案参数合并 + `effectiveLevel` 门槛档位（纯函数，有测试） |
-| `server/sessions.js` | 单次查词流程的进度 —— **读音/释义接口的 403 门禁依据** |
+| `server/sessions.js` | 单次查词流程的进度 + **唯一允许改门禁状态的函数**（创建会话、记输入/跟读、求助、快速查看） |
+| `server/routes/session.js` | **服务端验证输入阶段**：`POST /api/session` 绑定目标词、`POST /api/typing` 自己比对并数够 N 次 |
 | `server/vocab.js` | 生词本、复习调度、本地日期 |
 | `server/scoring-policy.js` | 评测结果 → 通过/失败/**不计入失败**的处置策略（纯函数，有测试） |
 | `server/scorers/` | 评测器：`mock`（开发）/ `xunfei`（已接通）/ `tencent`（占位） |
@@ -86,7 +87,7 @@
 | `public/app.js` | 界面与流程编排（单文件，较长） |
 | `public/tts.js`、`audio-record.js` | 标准读音（男性嗓音优先级）、录音并转 16k/16bit/单声道 WAV |
 | `scripts/build-dict.js` | ECDICT → `dict.db`（含中文反查索引 `zh_index`） |
-| `tests/` | `node:test` 共 102 个；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
+| `tests/` | `node:test` 共 119 个（含 13 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
 
 ## 不能改坏的硬约束（都是联调/踩坑换来的，改动请连带跑测试）
 
@@ -97,22 +98,47 @@
 - **前端禁止 `window.confirm/alert/prompt`**：内嵌浏览器与 iPad 会屏蔽系统弹窗（confirm 直接返回 false，操作静默失败）。用应用内的 `askConfirm()` / `toast()`。
 - **`public/tts.js` 不能取 `voices[0]`**：macOS 上那是机器人音 Albert，要按候选列表挑饱满男声。
 - 所有用户数据表都带 `profile_id`，请求带 `X-Profile-Id` 头。
-- **读音与释义接口有服务器端校验**（未完成输入/跟读 → 403），不要为了"方便"去掉门禁。
+
+### 门槛不可绕过（这七条是核心不变量，改动务必跑安全回归测试）
+
+1. **「输入 N 次」由服务端判定**：`POST /api/session` 绑定目标词（服务端自己查词典确认存在），
+   `POST /api/typing` 由服务端比对字符串并累加。客户端上报的进度一概不算数。
+2. **会话绑定目标词且创建后不可改**：同一 `sessionId` 换词必须 403（否则「给容易的词过关 → 改词 → 看释义」）。
+3. **释义必须同时满足**：同档案 + 同会话 + `session.word === 请求的词`（归一化后）+ 输入已完成 +
+   （跟读达标 或 求助通关 或 快速查看 或 该词已学会）。见 `sessions.js` 的 `sessionUnlocksMeaning()`。
+4. **读音同理**：`sessionUnlocksPronunciation()`。
+5. **`/api/events` 只记录、绝不授权**：它接收前端上报，所以不能改变任何放行状态；
+   只接受不涉及放行的类型（`lookup_start` / `not_found` / `cancel` / `network_error`）。
+6. **求助通关由服务端判定**：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`，否则 403。
+7. **校准分数线只由服务端算**：`/api/calibration/start` 清样本、`/api/score` 带 `calibration:true` 时
+   由服务端把分数写进 `calibration_samples`、`/api/calibration/finish` 由服务端算平均分
+   （有效样本 < 2 个则保留原分数线）。客户端提交的任何分数一律忽略。
+
+另外：**启动即强检查**——`SCORER=mock` 且没有显式 `WORDLOCK_DEV=1` 时拒绝启动；
+选了 `xunfei`/`tencent` 但密钥缺失也拒绝启动（避免静默变成"随便念都能过"）。
 
 ## 常用命令
 
 ```bash
 npm start              # HTTP（电脑上用；本会话沙箱内不能监听端口）
 npm run start:https    # HTTPS（iPad 用麦克风时需要，先 npm run certs）
-npm test               # 102 个测试（单元 + 进程内集成）
+npm test               # 119 个测试（单元 + 进程内集成 + 安全回归）
 npm run build-dict     # 由 data/raw 的 ECDICT 重建 data/dict.db（约 35 秒）
 npm run try-scorer     # 用 macOS say 合成人声送真实评测，验证密钥与计分是否正常
+npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（单文件源码快照，供外部 AI 审阅）
+npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时用，需 .github-token）
 ```
+
+> **只读一个文件就能拿到全部源码**：`docs/REVIEW-PACK.md`（自包含快照，含背景说明与
+> 全部源码）。抓取 GitHub 目录页失败时，直接读这个文件即可，不必逐个找源文件。
 
 ## 欢迎重点审阅的地方
 
-1. `server/routes/parent.js`：家长 PIN 与令牌机制是否够稳（当前是进程内 HMAC，服务重启即失效）。
-2. `server/routes/score.js` + `server/scoring-policy.js`：**计分与"不计入失败"的规则有没有漏洞——孩子能不能绕过门槛？**（这是本项目的核心不变量）
+1. `server/routes/parent.js`：家长 PIN 与令牌机制是否够稳（当前是进程内会话 + 30 分钟空闲过期，
+   失败 5 次后按 30 秒起逐次翻倍锁定，首次设置只允许本机）。
+2. `server/routes/score.js` + `server/scoring-policy.js` + `server/routes/session.js`：
+   **门槛与计分还有没有漏洞——孩子能不能绕过？**（这是本项目的核心不变量，
+   `tests/integration.test.js` 末尾那 13 个"安全 N"用例就是它的看门狗）
 3. `public/state-machine.js`：换词重置、中文入口、待巩固流程的边界情况。
 4. `server/vocab.js`：复习调度（间隔 [1,2,7]、求助通关额外一轮、毕业后不再推送）、日期边界。
 5. `server/routes/parent.js` 的"每周汇总 / 放弃点判定"（需求 2.10：未到 `meaning_shown` 且 10 分钟无新事件即视为放弃）。
@@ -171,7 +197,7 @@ cd ~/Desktop/word-lock && npm start
 
 浏览器打开 **http://localhost:3000**。想换端口：`PORT=3001 npm start`。
 
-5. 跑测试：`npm test`（共 73 个测试：单元测试 + 接口集成测试）。
+5. 跑测试：`npm test`（共 119 个测试：单元测试 + 接口集成测试，含一组"门槛不可绕过"的安全回归）。
 
 ## 二、功能总览（按使用场景）
 
@@ -286,7 +312,8 @@ cd ~/Desktop/word-lock && npm run try-scorer
 | 想看到底发生了什么 | 把 `.env` 里 `XUNFEI_DEBUG` 改成 `1` 再重启，服务器日志会打印与讯飞的完整往来和评分 XML |
 
 > 想临时回到模拟打分：把 `.env` 里的 `SCORER` 改成 `mock` 并重启。
-> 还有个小技巧：浏览器打开 `http://localhost:3000/?dev=1` 会出现"模拟评分"滑块，不用麦克风也能测完整流程（给孩子用时不要加 `?dev=1`）。
+> 开发时想不用麦克风测流程：在 `.env` 里加 `WORDLOCK_DEV=1` 并在浏览器地址后加 `?dev=1`（会出现"模拟评分"滑块）。
+> **注意**：`WORDLOCK_DEV` 只是让自己调试用的开关；不设它、又用着 `SCORER=mock`，服务器会直接拒绝启动。
 
 ## 四、iPad 上使用（要用麦克风就必须做这步）
 
@@ -304,7 +331,7 @@ cd ~/Desktop/word-lock && brew install mkcert
 cd ~/Desktop/word-lock && npm run certs
 ```
 
-`npm run certs` 会自动找出电脑在局域网里的地址（你这台是 `192.168.1.123`）写进证书，并告诉你证书放在哪。
+`npm run certs` 会自动找出电脑在局域网里的地址（形如 `192.168.x.x`）写进证书，并告诉你证书放在哪。
 
 > 这一步也可能要你输一次 Mac 密码（把本地根证书装进系统信任列表，这样**电脑自己的浏览器**也不会报“不安全”）。
 > 不想输密码就运行 `npm run certs -- --no-install`：证书照样能用，iPad 不受影响，只是电脑浏览器打开 https 会提示一次“不安全”。
@@ -322,7 +349,7 @@ cd ~/Desktop/word-lock && npm run start:https
 ```
 WordLock 已启动（HTTPS）
   这台电脑上打开：https://localhost:3000
-  iPad 上用这个地址：https://192.168.1.123:3000   ← 就是这一行
+  iPad 上用这个地址：https://192.168.x.x:3000   ← 就是这一行
 ```
 
 记下 iPad 那个地址。
@@ -345,12 +372,12 @@ mkcert -CAROOT
 
 ### 第 4 步：在 iPad 上打开
 
-1. iPad 用 **Safari** 打开第 2 步记下的地址，例如 `https://192.168.1.123:3000`
+1. iPad 用 **Safari** 打开第 2 步记下的地址，例如 `https://192.168.x.x:3000`
 2. 第一次点麦克风会问权限 → 选「允许」（也许要先去 **设置 → Safari → 麦克风** 打开）
 3. 点 Safari 的**分享按钮 → 添加到主屏幕**，就能像 App 一样全屏使用
 
 > 已经帮你生成好的证书文件在这里（隔空投送的时候用这个）：
-> `/Users/ericyuan/Library/Application Support/mkcert/rootCA.pem`
+> 位置是 `$(mkcert -CAROOT)/rootCA.pem`（在终端里运行 `mkcert -CAROOT` 就能看到目录）。
 
 ### 遇到问题怎么办
 
@@ -403,7 +430,8 @@ mkcert -CAROOT
     "build-dict": "node scripts/build-dict.js",
     "certs": "node scripts/make-certs.js",
     "try-scorer": "node scripts/try-scorer.js",
-    "review-pack": "node scripts/make-review-pack.js"
+    "review-pack": "node scripts/make-review-pack.js",
+    "push-github": "node scripts/push-to-github.js"
   },
   "dependencies": {
     "better-sqlite3": "^12.4.1",
@@ -424,7 +452,13 @@ mkcert -CAROOT
 // WordLock 界面与流程（阶段 1～6）。
 // 流程：档案 → 输入 N 次（英文/中文入口）→ 读音 → 跟读 M 次 → 释义 → 生词本/复习。
 
-import { createTypingSession, createReadingSession } from './state-machine.js';
+import {
+  createTypingSession,
+  createReadingSession,
+  MSG_INVALID,
+  MSG_LENGTH,
+  positionMessage,
+} from './state-machine.js';
 import { unlockTTS, speakWord, listEnglishVoices } from './tts.js';
 import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js';
 import { createRecorder } from './audio-record.js';
@@ -693,19 +727,12 @@ async function submitInput() {
   input.value = '';
   if (!raw.trim()) return;
 
-  // 待巩固流程：目标已定，照抄输入
-  if (state.session.isAwaitingFirst() && state.learn?.consolidate) {
-    applyResult(state.session.nextInput(raw));
-    return;
-  }
-
   // 含汉字 → 中文入口（需求 2.0）
   if (state.session.isAwaitingFirst() && state.session.getState().mode === 'en' && /[一-鿿]/.test(raw)) {
     await searchChinese(raw.trim());
     return;
   }
 
-  const awaitingFirst = state.session.isAwaitingFirst();
   const precheck = state.session.prepare(raw);
   if (!precheck.ok) {
     showFeedback(precheck.message, false);
@@ -713,78 +740,122 @@ async function submitInput() {
     return;
   }
 
-  if (awaitingFirst) {
-    if (!state.lookupStarted) {
-      state.lookupStarted = true;
-      logEvents([{ type: 'lookup_start', word: precheck.word }]);
-    }
-    try {
-      const dictResult = await api('/api/check-word', {
-        method: 'POST',
-        body: JSON.stringify({
-          word: precheck.word,
-          suggest: state.session.getState().notFoundStreak >= 1,
-        }),
-      });
-      if (dictResult.exists && !dictResult.allowed) {
-        showFeedback('今天的词已经查够啦，明天再来', false);
-        playGentleSound(soundOn());
-        return;
-      }
-      const result = state.session.firstInput(raw, dictResult);
-      if (dictResult.exists && dictResult.learned) {
-        // 已学会的词免门槛（需求 2.8）
-        state.session.cancel();
-        await showLearned(dictResult.word);
-        return;
-      }
-      if (dictResult.exists && !state.session.isAwaitingFirst()) {
-        state.targetWord = dictResult.word;
-        state.learn = { word: dictResult.word, entryMode: 'en', consolidate: false };
-        maybeShowPeek();
-      }
-      applyResult(result);
-    } catch (err) {
-      showFeedback(err.userMessage || '出了点小状况，请再试一次', false);
-    }
+  if (state.session.isAwaitingFirst()) {
+    await firstLookup(precheck.word, raw);
+    return;
+  }
+  await submitTyping(raw);
+}
+
+// 把当前会话绑定到目标词（服务端记账的唯一入口）
+async function bindSession(word, mode) {
+  try {
+    return await api('/api/session', {
+      method: 'POST',
+      session: true,
+      body: JSON.stringify({ sessionId: state.sessionId, word, mode }),
+    });
+  } catch (err) {
+    showFeedback(err.userMessage || '出了点小状况，请重新开始查这个词', false);
+    return null;
+  }
+}
+
+// 英文入口第 1 次输入：先查词典；命中后由服务端绑定会话并计第 1 次
+async function firstLookup(word, raw) {
+  if (!state.lookupStarted) {
+    state.lookupStarted = true;
+    logEvents([{ type: 'lookup_start', word }]);
+  }
+  let dictResult;
+  try {
+    dictResult = await api('/api/check-word', {
+      method: 'POST',
+      body: JSON.stringify({
+        word,
+        suggest: state.session.getState().notFoundStreak >= 1,
+      }),
+    });
+  } catch (err) {
+    showFeedback(err.userMessage || '出了点小状况，请再试一次', false);
     return;
   }
 
-  applyResult(state.session.nextInput(raw));
-}
-
-function applyResult(result) {
-  logEvents(result.events);
-
-  if (result.status === 'not_found') {
+  // 本地状态机只负责"找不到的连击"和相近词提示，不决定放行
+  const result = state.session.firstInput(raw, dictResult);
+  if (!dictResult.exists) {
+    logEvents(result.events);
     showFeedback(result.message, false);
     playGentleSound(soundOn());
     showSuggestions(result.suggestions);
     return;
   }
-  hideSuggestions();
-
-  if (result.status === 'invalid' || result.status === 'wrong') {
-    showFeedback(result.message, false);
+  if (dictResult.learned) {
+    state.session.cancel();
+    await showLearned(dictResult.word);
+    return;
+  }
+  if (!dictResult.allowed) {
+    showFeedback('今天的词已经查够啦，明天再来', false);
     playGentleSound(soundOn());
     return;
   }
+  hideSuggestions();
 
-  if (result.status === 'progress') {
-    renderProgress(result.completed);
-    showFeedback(CHEERS[state.cheerIndex++ % CHEERS.length], true);
-    playStepSound(soundOn());
-    $('input-word').focus();
-    return;
-  }
-
-  if (result.status === 'done') {
-    state.targetWord = result.target;
-    renderProgress(result.completed);
+  state.targetWord = dictResult.word;
+  state.learn = { word: dictResult.word, entryMode: 'en', consolidate: false };
+  const bound = await bindSession(dictResult.word, 'en');
+  if (!bound) return;
+  maybeShowPeek();
+  if (bound.done) {
+    renderProgress(bound.completed);
     showFeedback('输入完成！', true);
     playSuccessSound(soundOn());
     openPronunciation();
+  } else {
+    renderProgress(bound.completed);
+    showFeedback(CHEERS[state.cheerIndex++ % CHEERS.length], true);
+    playStepSound(soundOn());
+    $('input-word').focus();
   }
+}
+
+// 后续每次输入：由服务端比对与计数（客户端说的不算数）
+async function submitTyping(raw) {
+  let r;
+  try {
+    r = await api('/api/typing', {
+      method: 'POST',
+      session: true,
+      body: JSON.stringify({ sessionId: state.sessionId, typed: raw }),
+    });
+  } catch (err) {
+    showFeedback(err.userMessage || '出了点小状况，请再试一次', false);
+    return;
+  }
+
+  if (r.ok) {
+    if (r.done) {
+      renderProgress(r.completed);
+      showFeedback('输入完成！', true);
+      playSuccessSound(soundOn());
+      openPronunciation();
+    } else {
+      renderProgress(r.completed);
+      showFeedback(CHEERS[state.cheerIndex++ % CHEERS.length], true);
+      playStepSound(soundOn());
+      $('input-word').focus();
+    }
+    return;
+  }
+  if (r.reason === 'invalid_chars') {
+    showFeedback(MSG_INVALID, false);
+  } else if (r.reason === 'mismatch') {
+    showFeedback(r.hint === 'length' ? MSG_LENGTH : positionMessage(r.position), false);
+  } else {
+    showFeedback('再看看这个词吧', false);
+  }
+  playGentleSound(soundOn());
 }
 
 function soundOn() {
@@ -876,6 +947,8 @@ function pickCandidate(item) {
   maybeShowPeek();
   showView('view-main');
   $('input-word').focus();
+  // 中文入口从 0/N 开始，由服务端绑定目标词（服务端自己查词典确认存在）
+  bindSession(state.targetWord, 'zh').catch(() => {});
 }
 
 function backFromZhTyping() {
@@ -1021,8 +1094,10 @@ function beginReading(word) {
   setTimeout(() => speak(word), 1200);
 }
 
-function renderReadingProgress() {
-  const m = state.reading.getState().requiredCount;
+function renderReadingProgress(passes, required) {
+  const st = state.reading.getState();
+  const m = required ?? st.requiredCount;
+  const done = passes ?? st.passes;
   const dots = $('reading-dots');
   if (dots.childElementCount !== m) {
     dots.textContent = '';
@@ -1032,10 +1107,9 @@ function renderReadingProgress() {
       dots.append(d);
     }
   }
-  const st = state.reading.getState();
-  [...dots.children].forEach((d, i) => d.classList.toggle('on', i < st.passes));
+  [...dots.children].forEach((d, i) => d.classList.toggle('on', i < done));
   $('reading-progress-text').textContent =
-    st.readingMode === 'streak' ? `连续通过 ${st.passes}/${st.requiredCount}` : `通过 ${st.passes}/${st.requiredCount}`;
+    st.readingMode === 'streak' ? `连续通过 ${done}/${m}` : `通过 ${done}/${m}`;
 }
 
 function starString(n) {
@@ -1135,9 +1209,13 @@ function handleScoreResult(res, word) {
     return;
   }
 
-  const rs = state.reading.recordAttempt({ score: res.score, passed: res.passed });
-  $('reading-stars').textContent = starString(rs.stars);
-  renderReadingProgress();
+  // 次数与能否求助都以服务端返回为准（客户端说的不算数）
+  const passes = res.passes ?? 0;
+  const required = res.requiredCount ?? state.bundle.readingCount;
+  const passedNow = Boolean(res.passed);
+  $('reading-stars').textContent = starString(passedNow ? (res.score >= Math.min(100, s.passScore + 15) ? 3 : 2) : 1);
+  renderReadingProgress(passes, required);
+  const rs = { status: passedNow ? (passes >= required ? 'done' : 'pass') : 'fail', canHelp: Boolean(res.canHelp) };
   if (rs.status === 'done') {
     showFeedback('读得真棒！', true, 'feedback-reading');
     playSuccessSound(soundOn());
@@ -1157,6 +1235,8 @@ function handleScoreResult(res, word) {
 /* ---------- 首次校准（阶段 2） ---------- */
 
 function startCalibration(nextWord) {
+  // 分数由服务端记录，客户端不上报任何分数
+  api('/api/calibration/start', { method: 'POST', session: true }).catch(() => {});
   state.calibration = { words: CALIBRATION_WORDS, idx: 0, scores: [], nextWord };
   state.reading = createReadingSession({ requiredCount: 1, passScore: 0, helpAfterFails: 99 });
   $('reading-title').textContent = '先试一试';
@@ -1174,15 +1254,16 @@ function startCalibration(nextWord) {
 }
 
 async function finishCalibration() {
-  const scores = state.calibration.scores;
+  const spokeAnything = state.calibration.scores.length > 0;
   const nextWord = state.calibration.nextWord;
   state.calibration = null;
   try {
-    if (scores.length) {
-      await api('/api/calibration', { method: 'POST', body: JSON.stringify({ scores }) });
-    } else {
-      await api('/api/calibration', { method: 'POST', body: JSON.stringify({ skipped: true }) });
-    }
+    // 只告诉服务端"试着读完了"；分数线由服务端按自己记录的分数算（客户端无法伪造）
+    await api('/api/calibration/finish', {
+      method: 'POST',
+      session: true,
+      body: JSON.stringify({ skipped: !spokeAnything }),
+    });
     state.bundle = await api('/api/settings');
     showFeedback('准备好啦！', true, 'feedback-reading');
     setTimeout(() => beginReading(nextWord), 1000);
@@ -1284,6 +1365,8 @@ function startConsolidation() {
   renderProgress(0);
   showView('view-main');
   $('input-word').focus();
+  // 待巩固也走服务端绑定：目标词由服务端确认存在，输入次数由服务端数
+  bindSession(item.word, 'zh').catch(() => {});
 }
 
 // 巩固流程读音通关后由 score 路由转正；这里轮询确认后弹出下一个
@@ -1923,12 +2006,21 @@ function bind() {
   $('btn-mic').addEventListener('click', toggleMic);
   $('btn-hear-standard').addEventListener('click', () => speak(state.targetWord));
   $('btn-help').addEventListener('click', () => {
-    const rs = state.reading.useHelp();
-    if (rs.status === 'done') {
-      logEvents([{ type: 'help_used', word: state.targetWord }], { step: 'reading' });
-      showFeedback('好，这次先帮你打开，之后要重点复习哦', true, 'feedback-reading');
-      setTimeout(() => openMeaning(), 800);
-    }
+    // 是否允许求助由服务端判定（读不够次数会被拒）
+    api('/api/help', {
+      method: 'POST',
+      session: true,
+      body: JSON.stringify({ word: state.targetWord, sessionId: state.sessionId }),
+    })
+      .then(() => {
+        $('btn-help').hidden = true;
+        showFeedback('好，这次先帮你打开，之后要重点复习哦', true, 'feedback-reading');
+        setTimeout(() => openMeaning(), 800);
+      })
+      .catch((err) => {
+        $('btn-help').hidden = true;
+        showFeedback(err.userMessage || '再多试几次吧', false, 'feedback-reading');
+      });
   });
   $('btn-dev-score').addEventListener('click', () => {
     submitScore({ mockScore: Number($('dev-score').value) });
@@ -4433,12 +4525,36 @@ import { openDictDb, openUserDb } from './db.js';
 import { createDictRouter } from './routes/dict.js';
 import { createProfileRouter, createProfileMiddleware } from './routes/profile.js';
 import { createEventsRouter } from './routes/events.js';
+import { createSessionRouter } from './routes/session.js';
 import { createScoreRouter } from './routes/score.js';
 import { createVocabRouter } from './routes/vocab.js';
 import { createChildRouter } from './routes/child.js';
 import { createParentRouter } from './routes/parent.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// 启动前的评测配置检查：宁可起不来，也不要让孩子在用"随便念都能过"的模拟打分。
+// 返回 null 表示没问题，否则返回一段中文说明。
+export function scorerConfigProblem() {
+  const name = (process.env.SCORER || 'mock').toLowerCase();
+  const dev = (process.env.WORDLOCK_DEV ?? '') === '1';
+  if (name === 'mock' && !dev) {
+    return (
+      '当前用的是"模拟打分"（SCORER=mock），孩子随便念都能通过，不能这样给孩子用。\n' +
+      '  ① 正式使用：在 .env 里填好密钥并设 SCORER=xunfei\n' +
+      '  ② 只是自己调试：在 .env 里加一行 WORDLOCK_DEV=1（明确声明这是开发模式）'
+    );
+  }
+  if (name === 'xunfei') {
+    const missing = ['XUNFEI_APP_ID', 'XUNFEI_API_KEY', 'XUNFEI_API_SECRET'].filter((k) => !process.env[k]);
+    if (missing.length) return `SCORER=xunfei，但 .env 里缺：${missing.join('、')}`;
+  }
+  if (name === 'tencent') {
+    const missing = ['TENCENT_SECRET_ID', 'TENCENT_SECRET_KEY'].filter((k) => !process.env[k]);
+    if (missing.length) return `SCORER=tencent，但 .env 里缺：${missing.join('、')}`;
+  }
+  return null;
+}
 
 export function createApp({ userDb, dictDb }) {
   const app = express();
@@ -4451,11 +4567,16 @@ export function createApp({ userDb, dictDb }) {
   app.use('/api', createParentRouter(userDb));
   // 之后的接口都需要已选择档案
   app.use('/api', requireProfile);
+  // 所有正常接口
   app.use('/api', createEventsRouter(userDb));
+  app.use('/api', createSessionRouter(userDb, () => dictDb));
   app.use('/api', createScoreRouter(userDb));
   app.use('/api', createVocabRouter(userDb, () => dictDb));
   app.use('/api', createChildRouter(userDb, () => dictDb));
   app.use('/api', createDictRouter({ getDictDb: () => dictDb, userDb }));
+
+  // 没匹配到的接口：明确返回 JSON 404（而不是 HTML 错误页，也避免请求挂住）
+  app.use('/api', (req, res) => res.status(404).json({ error: '没有这个接口' }));
 
   app.use((err, req, res, next) => {
     console.error(err);
@@ -4544,10 +4665,12 @@ export function openUserDb() {
       session_id  TEXT NOT NULL,
       word        TEXT,
       mode        TEXT NOT NULL DEFAULT 'en',
+      typing_count INTEGER NOT NULL DEFAULT 0,
       typing_done INTEGER NOT NULL DEFAULT 0,
       read_pass   INTEGER NOT NULL DEFAULT 0,
       read_fail   INTEGER NOT NULL DEFAULT 0,
       read_attempts INTEGER NOT NULL DEFAULT 0,
+      best_score  INTEGER NOT NULL DEFAULT 0,
       assisted    INTEGER NOT NULL DEFAULT 0,
       quick_peek  INTEGER NOT NULL DEFAULT 0,
       meaning_shown INTEGER NOT NULL DEFAULT 0,
@@ -4577,8 +4700,26 @@ export function openUserDb() {
       key   TEXT PRIMARY KEY,
       value TEXT NOT NULL
     );
+    -- 首次校准的分数样本：只由服务端写，客户端无法伪造（防止故意压低分数线）
+    CREATE TABLE IF NOT EXISTS calibration_samples (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      profile_id INTEGER NOT NULL,
+      ts         TEXT NOT NULL,
+      score      INTEGER NOT NULL,
+      clean      INTEGER NOT NULL DEFAULT 1
+    );
   `);
+  // 并发加固：多设备（电脑 + iPad）同时用时不至于因锁竞争直接抛错
+  db.pragma('busy_timeout = 5000');
+  // 老库升级：老版本的 learn_sessions 没有这两列
+  addColumnIfMissing(db, 'learn_sessions', 'typing_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumnIfMissing(db, 'learn_sessions', 'best_score', 'INTEGER NOT NULL DEFAULT 0');
   return db;
+}
+
+function addColumnIfMissing(db, table, column, definition) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
 }
 ````
 
@@ -4626,10 +4767,17 @@ import path from 'node:path';
 import https from 'node:https';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.js';
-import { boot } from './app.js';
+import { boot, scorerConfigProblem } from './app.js';
 
 loadEnv();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// 评测没配好就别启动（避免静默变成"随便念都能过"）
+const problem = scorerConfigProblem();
+if (problem) {
+  console.error(`\n启动失败：${problem}\n`);
+  process.exit(1);
+}
 const { app } = boot();
 
 const PORT = Number(process.env.PORT) || 3000;
@@ -4784,9 +4932,9 @@ export function mergeSettings(presetKey, overridesJson) {
 
 import { Router } from 'express';
 import { getProfileBundle, countActiveDays } from '../settings.js';
-import { getLearnedWord, getVocabWord, todayLocal } from '../vocab.js';
+import { getLearnedWord, getVocabWord, graduateWord, todayLocal } from '../vocab.js';
 import { lookupLimitState } from '../limits.js';
-import { getSession, upsertSession } from '../sessions.js';
+import { getSession, markMeaningShown, useHelp, useQuickPeek } from '../sessions.js';
 
 export function createChildRouter(userDb, getDictDb) {
   const router = Router();
@@ -4834,6 +4982,12 @@ export function createChildRouter(userDb, getDictDb) {
       return res.status(400).json({ error: '词不对' });
     }
 
+    // 必须绑定到「本会话正在查的那个词」：否则可以拿 apple 的会话去快速查看任意词
+    const session = getSession(userDb, profileId, sessionId);
+    if (!session || session.word !== word) {
+      return res.status(403).json({ error: '这个会话不对应这个词，请重新开始' });
+    }
+
     // pending 的词不覆盖已学会的（需求 2.8 / 阶段5）
     const existing = getVocabWord(userDb, profileId, word);
     if (!existing || existing.status !== 'learned') {
@@ -4849,10 +5003,46 @@ export function createChildRouter(userDb, getDictDb) {
     const ts = new Date().toISOString();
     insertEvent.run(profileId, ts, sessionId, mode, word, 'typing', 'quick_peek', null);
     insertEvent.run(profileId, ts, sessionId, mode, word, 'meaning', 'meaning_shown', JSON.stringify({ quickPeek: true }));
-    upsertSession(userDb, profileId, sessionId, { word, mode, quick_peek: 1, meaning_shown: 1 });
+    // 只有走完上面的额度校验、且会话绑定的是这个词，才由服务端写入放行标记
+    useQuickPeek(userDb, profileId, session);
+    markMeaningShown(userDb, profileId, session);
 
     const remaining = quota - used - 1;
     res.json({ ok: true, lines: translationLines(word, bundle.settings.meaningLines), remaining });
+  });
+
+  // 求助通关（需求 2.3）：由**服务端**确认「累计读不过 helpAfterFails 次」才放行。
+  // 以前客户端发一条 help_used 事件就能通关（实测可绕过），现在必须服务端同意。
+  router.post('/help', (req, res) => {
+    const profileId = req.profile.id;
+    const bundle = getProfileBundle(userDb, req.profile);
+    const word = String(req.body?.word ?? '').trim().toLowerCase().slice(0, 64);
+    const sessionId = String(req.body?.sessionId ?? '').slice(0, 64) || null;
+    const session = getSession(userDb, profileId, sessionId);
+    if (!session || session.word !== word) {
+      return res.status(403).json({ error: '这个会话不对应这个词，请重新开始' });
+    }
+    if (session.typing_done !== 1) {
+      return res.status(403).json({ error: '要先完成输入才能求助哦' });
+    }
+    if (session.assisted === 1) return res.json({ ok: true, assisted: true, alreadyHelped: true });
+
+    const need = Math.max(1, Math.floor(bundle.settings.helpAfterFails ?? 4));
+    if (session.read_fail < need) {
+      return res.status(403).json({
+        error: '再多试几次吧',
+        remaining: need - session.read_fail,
+      });
+    }
+    useHelp(userDb, profileId, session);
+    insertEvent.run(profileId, new Date().toISOString(), sessionId, session.mode, word, 'reading', 'help_used', null);
+    graduateWord(userDb, profileId, word, {
+      settings: bundle.settings,
+      assisted: true,
+      readAttempts: session.read_attempts,
+      bestScore: session.best_score,
+    });
+    res.json({ ok: true, assisted: true });
   });
 
   // 学习天数（需求 阶段6）：本周（近 7 天）与累计；不做断签清零
@@ -4912,7 +5102,7 @@ export function createChildRouter(userDb, getDictDb) {
 import { Router } from 'express';
 import { findSuggestions } from '../suggest.js';
 import { searchZh } from '../zh-search.js';
-import { getSession } from '../sessions.js';
+import { getSession, sessionUnlocksPronunciation } from '../sessions.js';
 import { getLearnedWord } from '../vocab.js';
 import { getProfileBundle } from '../settings.js';
 import { lookupLimitState } from '../limits.js';
@@ -4970,11 +5160,11 @@ export function createDictRouter({ getDictDb, userDb }) {
     if (!row) {
       return res.status(404).json({ error: '词典里没有这个词' });
     }
-    // 服务器校验（需求 阶段3）：会话已完成输入，或该词已学会
+    // 服务器校验（需求 阶段3）：会话**绑定的是这个词**且输入已完成，或该词已学会
     const learned = getLearnedWord(userDb, req.profile.id, word);
     if (!learned) {
       const session = getSession(userDb, req.profile.id, req.get('X-Session-Id'));
-      if (!session || session.typing_done !== 1) {
+      if (!sessionUnlocksPronunciation(session, word)) {
         return res.status(403).json({ error: '要先完成输入才能听读音哦' });
       }
     }
@@ -5008,12 +5198,25 @@ export function createDictRouter({ getDictDb, userDb }) {
 ## 📄 server/routes/events.js
 
 ````js
-// 查词事件记录（需求 2.10）。某些事件同时推进会话进度（阶段 3 的校验依据）。
+// 查词事件记录（需求 2.10）——**只记录，不授权**。
+//
+// 安全不变量：这个接口从前端接收数据，所以它绝不能改变任何门禁状态。
+// 以前它会在收到 help_used 时直接把词判为「已学会」，等于让孩子自报「我用过求助了」
+// 就能看到释义（实测可绕过）。现在：
+//   - 会不会放行，只由 /api/session、/api/typing、/api/score、/api/help、/api/quick-peek
+//     这些服务端能核实真实动作的接口决定；
+//   - 这里只往 events 表写一行日志，供家长模式看记录与「放弃点」统计。
 
 import { Router } from 'express';
-import { applyEventToSession, getSession, upsertSession } from '../sessions.js';
-import { getProfileBundle } from '../settings.js';
-import { graduateWord } from '../vocab.js';
+
+// 这些事件不涉及任何放行，允许客户端上报（都是"孩子做了什么"的观察值）
+const CLIENT_REPORTABLE = new Set([
+  'lookup_start',
+  'not_found',
+  'cancel',
+  'network_error',
+  'quick_peek_request', // 只是"点了按钮"的记录；真正的放行看 /api/quick-peek
+]);
 
 export function createEventsRouter(userDb) {
   const router = Router();
@@ -5030,39 +5233,22 @@ export function createEventsRouter(userDb) {
       for (const e of list) {
         const type = typeof e.type === 'string' ? e.type.slice(0, 64) : '';
         if (!type) continue;
-        const word = typeof e.word === 'string' ? e.word.slice(0, 64) : null;
-        const sid = typeof e.sessionId === 'string' ? e.sessionId.slice(0, 64) : null;
+        // 服务端负责的门禁事件不接受客户端上报（避免重复计数，也避免被伪造利用）
+        if (!CLIENT_REPORTABLE.has(type)) continue;
         insert.run(
           profileId,
           ts,
-          sid,
+          typeof e.sessionId === 'string' ? e.sessionId.slice(0, 64) : null,
           e.mode === 'zh' ? 'zh' : 'en',
-          word,
+          typeof e.word === 'string' ? e.word.slice(0, 64) : null,
           typeof e.step === 'string' ? e.step.slice(0, 32) : null,
           type,
           e.detail == null ? null : JSON.stringify(e.detail)
         );
-        applyEventToSession(userDb, profileId, {
-          session_id: sid,
-          type,
-          word,
-          mode: e.mode === 'zh' ? 'zh' : 'en',
-        });
-
-        // 求助通关：立即写入生词本（assisted，之后会重点复习）
-        if (type === 'help_used' && word && sid) {
-          const bundle = getProfileBundle(userDb, req.profile);
-          const session = getSession(userDb, profileId, sid);
-          graduateWord(userDb, profileId, word, {
-            settings: bundle.settings,
-            assisted: true,
-            readAttempts: session?.read_attempts ?? 0,
-          });
-        }
       }
     });
     run();
-    res.json({ ok: true });
+    res.json({ ok: true, recorded: true });
   });
 
   return router;
@@ -5086,17 +5272,61 @@ import { todayLocal, effectiveIntervals, getVocabWord } from '../vocab.js';
 
 const router = Router();
 
-/* ---------- 访问令牌：服务重启后失效，需重新输 PIN ---------- */
+/* ---------- 访问令牌：服务重启后失效；页面空闲 30 分钟也要重新输密码 ---------- */
 
-const bootSecret = crypto.randomBytes(32);
-const parentToken = () => crypto.createHmac('sha256', bootSecret).update('parent-v1').digest('hex');
+const SESSION_IDLE_MS = 30 * 60 * 1000;
+const parentSessions = new Map(); // token → 最近一次使用时间
+
+function issueToken() {
+  const token = crypto.randomBytes(24).toString('hex');
+  parentSessions.set(token, Date.now());
+  return token;
+}
 
 function requireParent(req, res, next) {
   const token = String(req.get('X-Parent-Token') ?? '');
-  if (token !== parentToken()) {
+  const lastUsed = parentSessions.get(token);
+  if (!lastUsed) {
     return res.status(401).json({ error: '请先输入家长密码' });
   }
+  if (Date.now() - lastUsed > SESSION_IDLE_MS) {
+    parentSessions.delete(token);
+    return res.status(401).json({ error: '太久没操作，请重新输入家长密码' });
+  }
+  parentSessions.set(token, Date.now());
   next();
+}
+
+/* ---------- PIN 防暴力破解：失败次数入库，锁定时间逐步翻倍 ---------- */
+
+const PIN_MAX_FAILS = 5;
+const PIN_BASE_LOCK_MS = 30 * 1000;
+
+function lockRemainingMs() {
+  const until = Number(getMeta('pin_locked_until') ?? 0);
+  return Math.max(0, until - Date.now());
+}
+
+function notePinFailure() {
+  const fails = Number(getMeta('pin_fails') ?? 0) + 1;
+  setMeta('pin_fails', String(fails));
+  if (fails >= PIN_MAX_FAILS) {
+    const rounds = Math.floor(fails / PIN_MAX_FAILS) - 1;
+    const lockMs = PIN_BASE_LOCK_MS * 2 ** Math.max(0, rounds);
+    setMeta('pin_locked_until', String(Date.now() + lockMs));
+  }
+  return fails;
+}
+
+function clearPinFailures() {
+  setMeta('pin_fails', '0');
+  setMeta('pin_locked_until', '0');
+}
+
+// 首次设置密码只允许在电脑本机操作，防止孩子抢先设一个只有他知道的密码
+function isLocalRequest(req) {
+  const ip = req.ip || req.socket?.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
 function getMeta(key) {
@@ -5125,13 +5355,23 @@ router.post('/parent/pin', (req, res) => {
   if (getMeta('parent_pin_hash')) {
     return res.status(403).json({ error: '密码已经设置过了，请直接输入' });
   }
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({
+      error: '第一次设置家长密码请在运行服务的这台电脑上操作（浏览器打开 http://localhost:3000）',
+    });
+  }
   const salt = crypto.randomBytes(16).toString('hex');
   setMeta('parent_pin_salt', salt);
   setMeta('parent_pin_hash', hashPin(pin, salt));
-  res.json({ ok: true, token: parentToken() });
+  clearPinFailures();
+  res.json({ ok: true, token: issueToken() });
 });
 
 router.post('/parent/login', (req, res) => {
+  const locked = lockRemainingMs();
+  if (locked > 0) {
+    return res.status(429).json({ error: `试的次数太多啦，请等 ${Math.ceil(locked / 1000)} 秒再试` });
+  }
   const pin = String(req.body?.pin ?? '');
   const salt = getMeta('parent_pin_salt');
   const hash = getMeta('parent_pin_hash');
@@ -5139,9 +5379,16 @@ router.post('/parent/login', (req, res) => {
   const a = Buffer.from(hash, 'hex');
   const b = Buffer.from(hashPin(pin, salt), 'hex');
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(403).json({ error: '密码不对，再试试' });
+    const fails = notePinFailure();
+    const waitMs = lockRemainingMs();
+    return res.status(waitMs > 0 ? 429 : 403).json({
+      error: waitMs > 0
+        ? `试的次数太多啦，请等 ${Math.ceil(waitMs / 1000)} 秒再试`
+        : `密码不对，再试试（还可以试 ${Math.max(0, PIN_MAX_FAILS - fails)} 次）`,
+    });
   }
-  res.json({ ok: true, token: parentToken() });
+  clearPinFailures();
+  res.json({ ok: true, token: issueToken() });
 });
 
 /* ---------- 以下都需要家长令牌（只挂 /parent 路径，避免拦截其他 /api 路由） ---------- */
@@ -5441,110 +5688,165 @@ export function createProfileRouter(userDb, requireProfile) {
 
 ````js
 // 发音评测接口（需求 5.1 / 阶段 2）+ 首次校准。
+//
+// 安全不变量：
+//   - 评分前必须确认：同一个档案、同一个会话、同一个词、**输入阶段已完成**。
+//     否则客户端可以直接调 /api/score 跳过「输入 N 次」这道门槛。
+//   - mockScore（模拟打分滑块）只在显式开发模式下生效，绝不作为安全边界。
+//   - 校准分数线由**服务端**根据自己记录的分数算，不接受客户端上报的分数。
 
 import { Router } from 'express';
 import { getScorer, scorerIsConfigured } from '../scorers/index.js';
 import { decideOutcome } from '../scoring-policy.js';
-import { getProfileBundle } from '../settings.js';
-import { LEVEL_COUNTS } from '../settings.js';
-import { upsertSession, getSession } from '../sessions.js';
+import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
+import { getSession, recordReadingPass, recordReadingFail, getSession as readSession } from '../sessions.js';
 import { graduateWord } from '../vocab.js';
 
 const MAX_AUDIO_BYTES = 4 * 1024 * 1024;
+const CALIBRATION_MIN_SAMPLES = 2;
+const CALIBRATION_CLAMP = [50, 75];
+
+const normalize = (s) => String(s ?? '').trim().toLowerCase();
 
 export function createScoreRouter(userDb) {
   const router = Router();
   const insertEvent = userDb.prepare(
     `INSERT INTO events (profile_id, ts, session_id, mode, word, step, type, detail)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, 'reading', ?, ?)`
   );
+  const logEvent = (profileId, sid, word, type, detail) =>
+    insertEvent.run(profileId, new Date().toISOString(), sid ?? null, 'en', word ?? null, type, detail ? JSON.stringify(detail) : null);
+
+  // 模拟打分只允许在显式开发模式下使用
+  const devMode = () => (process.env.WORDLOCK_DEV ?? '') === '1';
 
   router.post('/score', async (req, res) => {
     const profileId = req.profile.id;
     const bundle = getProfileBundle(userDb, req.profile);
     const passScore = Number(bundle.settings.passScore) || 60;
+    const requiredReading = LEVEL_COUNTS[bundle.effectiveLevel].reading;
 
-    const word = String(req.body?.word ?? '').slice(0, 64);
+    const word = normalize(req.body?.word);
     const sessionId = String(req.body?.sessionId ?? '').slice(0, 64) || null;
-    const audioBase64 = typeof req.body?.audioBase64 === 'string' ? req.body.audioBase64 : '';
-    const mockScore = Number(req.body?.mockScore);
-    const isMock = Number.isFinite(mockScore);
-    const isCalibration = Boolean(req.body?.calibration); // 校准不进生词本、不记读数
+    const isCalibration = Boolean(req.body?.calibration);
 
-    // 没录到有效声音：友好提示，不计入失败次数（需求 2.3）
+    /* ---- 门槛：会话必须存在、绑定同一个词、输入已完成 ---- */
+    const session = isCalibration ? null : getSession(userDb, profileId, sessionId);
+    if (!isCalibration) {
+      if (!session || session.word !== word) {
+        return res.status(403).json({ error: '这个会话不对应这个词，请重新开始' });
+      }
+      if (session.typing_done !== 1) {
+        return res.status(403).json({ error: '要先完成输入才能跟读哦' });
+      }
+    }
+
+    /* ---- 音频基本校验（不再因缺音频抛异常）---- */
+    const audioBase64 = typeof req.body?.audioBase64 === 'string' ? req.body.audioBase64 : '';
     const buffer = audioBase64 ? Buffer.from(audioBase64, 'base64') : null;
-    if (!isMock && (!buffer || buffer.length < 900)) {
-      return res.json({ score: null, passed: false, error: 'too_quiet', message: '没听清，靠近一点再念一遍' });
+    const mockScore = Number(req.body?.mockScore);
+    const useMock = Number.isFinite(mockScore) && devMode();
+
+    if (!useMock && (!buffer || buffer.length < 900)) {
+      return res.json({ score: null, passed: false, error: 'too_quiet', message: '没听清，靠近一点再念一遍', retry: true });
     }
     if (buffer && buffer.length > MAX_AUDIO_BYTES) {
-      return res.json({ score: null, passed: false, error: 'too_long', message: '录音有点长了，再试一次' });
+      return res.json({ score: null, passed: false, error: 'too_long', message: '录音有点长了，再试一次', retry: true });
     }
 
     const scorer = await getScorer();
     if (!scorerIsConfigured(scorer.name)) {
       return res.json({ score: null, passed: false, error: 'not_configured', message: '评测服务还没配置好' });
     }
-    const result = await scorer.score(buffer, word, { mockScore: req.body?.mockScore });
+
+    let result;
+    try {
+      result = await scorer.score(buffer, word, useMock ? { mockScore } : {});
+    } catch (err) {
+      console.warn(`[评测] ${scorer.name} 抛异常：${err.message}`);
+      result = { score: null, detail: null, error: 'scorer_error' };
+    }
+
+    /* ---- 校准：只由服务端记录分数 ---- */
+    if (isCalibration) {
+      if (result.error || result.score == null) {
+        const message = result.error === 'no_speech' ? '没听清，靠近一点再念一遍' : '评测没成功，再试一次';
+        return res.json({ score: null, passed: false, error: result.error || 'scorer_error', message, retry: true });
+      }
+      userDb
+        .prepare('INSERT INTO calibration_samples (profile_id, ts, score, clean) VALUES (?, ?, ?, ?)')
+        .run(profileId, new Date().toISOString(), result.score, result.detail?.noisy || result.detail?.nonsense ? 0 : 1);
+      return res.json({ score: result.score, passed: true, calibration: true, detail: null });
+    }
+
+    /* ---- 正常跟读 ---- */
     const outcome = decideOutcome(result, passScore);
     if (outcome.kind === 'retry') {
-      // 环境/设备问题：不计入失败次数（需求 2.3），提示温和（需求 2.9）
       return res.json({
         score: null,
         passed: false,
         error: result.error || 'bad_audio',
         message: outcome.message,
         retry: true,
+        canHelp: session.read_fail >= bundle.settings.helpAfterFails,
       });
     }
     if (outcome.kind === 'error') {
-      // 服务故障：技术细节只写进服务器日志，给孩子只说"再试一次"
       console.warn(`[评测] ${scorer.name} 失败：${result.error}`);
       return res.json({ score: null, passed: false, error: result.error || 'scorer_error', message: outcome.message });
     }
 
-    const passed = outcome.passed;
+    // 只有真正跑完一次评测（通过或没通过）才计入状态
+    if (outcome.passed) recordReadingPass(userDb, profileId, session, outcome.score);
+    else recordReadingFail(userDb, profileId, session);
+    logEvent(profileId, sessionId, word, outcome.passed ? 'read_pass' : 'read_fail', { score: outcome.score });
 
-    if (sessionId && !isCalibration) {
-      const col = passed ? 'read_pass' : 'read_fail';
-      upsertSession(userDb, profileId, sessionId, { word, mode: 'en' });
-      userDb
-        .prepare(
-          `UPDATE learn_sessions SET ${col} = ${col} + 1, read_attempts = read_attempts + 1, updated_at = ?
-           WHERE profile_id = ? AND session_id = ?`
-        )
-        .run(new Date().toISOString(), profileId, sessionId);
-      insertEvent.run(
-        profileId,
-        new Date().toISOString(),
-        sessionId,
-        'en',
-        word,
-        'reading',
-        passed ? 'read_pass' : 'read_fail',
-        JSON.stringify({ score: result.score })
-      );
-
-      // 读满 M 次（或求助通关）→ 通关写入生词本（阶段 3）
-      const session = getSession(userDb, profileId, sessionId);
-      if (session && !session.meaning_shown) {
-        const m = LEVEL_COUNTS[bundle.effectiveLevel].reading;
-        if (session.assisted || session.read_pass >= m) {
-          graduateWord(userDb, profileId, word, {
-            settings: bundle.settings,
-            assisted: Boolean(session.assisted),
-            readAttempts: session.read_attempts,
-            bestScore: result.score,
-          });
-        }
-      }
+    let current = readSession(userDb, profileId, sessionId);
+    // 读够 M 次 → 通关写入生词本
+    if (current.read_pass >= requiredReading) {
+      graduateWord(userDb, profileId, word, {
+        settings: bundle.settings,
+        assisted: Boolean(current.assisted),
+        readAttempts: current.read_attempts,
+        bestScore: current.best_score,
+      });
     }
+    current = readSession(userDb, profileId, sessionId);
 
-    res.json({ score: result.score, passed, detail: result.detail ?? null });
+    res.json({
+      score: outcome.score,
+      passed: outcome.passed,
+      detail: result.detail ?? null,
+      passes: current.read_pass,
+      requiredCount: requiredReading,
+      canHelp: !current.assisted && current.read_fail >= bundle.settings.helpAfterFails,
+    });
   });
 
-  // 首次校准（需求 阶段2）：passScore = clamp(round(平均分 − 15), 50, 75)
-  router.post('/calibration', (req, res) => {
+  /* ---------- 首次校准（需求 阶段2）---------- */
+
+  // 开始校准：清掉旧样本（分数完全由服务端记录，客户端无法伪造）
+  router.post('/calibration/start', (req, res) => {
+    userDb.prepare('DELETE FROM calibration_samples WHERE profile_id = ?').run(req.profile.id);
+    res.json({ ok: true });
+  });
+
+  // 结束校准：服务端算平均分 → passScore = clamp(round(avg − 15), 50, 75)
+  // 有效样本不足 2 个（例如孩子敷衍、被拒识）→ 保留原分数线，避免被故意压低。
+  router.post('/calibration/finish', (req, res) => {
     const profileId = req.profile.id;
+    const skipped = Boolean(req.body?.skipped);
+    const samples = userDb
+      .prepare('SELECT score, clean FROM calibration_samples WHERE profile_id = ?')
+      .all(profileId);
+    const usable = samples.filter((s) => s.clean === 1 && Number.isFinite(s.score) && s.score > 0);
+
+    let passScore = null;
+    if (!skipped && usable.length >= CALIBRATION_MIN_SAMPLES) {
+      const avg = usable.reduce((a, b) => a + b.score, 0) / usable.length;
+      passScore = Math.min(CALIBRATION_CLAMP[1], Math.max(CALIBRATION_CLAMP[0], Math.round(avg - 15)));
+    }
+
     const row = req.profile;
     let overrides = {};
     try {
@@ -5552,22 +5854,135 @@ export function createScoreRouter(userDb) {
     } catch {
       overrides = {};
     }
-    if (req.body?.skipped) {
-      overrides.calibrated = true;
-    } else {
-      const scores = Array.isArray(req.body?.scores) ? req.body.scores : [];
-      const nums = scores.map(Number).filter((n) => Number.isFinite(n));
-      if (!nums.length) {
-        return res.status(400).json({ error: '没有拿到校准分数' });
-      }
-      const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
-      overrides.passScore = Math.min(75, Math.max(50, Math.round(avg - 15)));
-      overrides.calibrated = true;
+    if (passScore != null) overrides.passScore = passScore;
+    overrides.calibrated = true;
+    userDb.prepare('UPDATE profiles SET settings_json = ? WHERE id = ?').run(JSON.stringify(overrides), profileId);
+    userDb.prepare('DELETE FROM calibration_samples WHERE profile_id = ?').run(profileId);
+
+    res.json({ ok: true, passScore, usedSamples: usable.length, totalSamples: samples.length });
+  });
+
+  return router;
+}
+````
+
+
+---
+
+## 📄 server/routes/session.js
+
+````js
+// 输入阶段的服务器验证（安全关键）。
+//
+// 为什么必须放在服务端：客户端可以改 JS、开 DevTools、直接调接口。
+// 「输入 N 次」这道门槛如果由浏览器自己说了算，就等于没有门槛。
+// 所以这里由服务端：① 绑定目标词 ② 自己比对每次输入 ③ 自己数够 N 次才放行。
+
+import { Router } from 'express';
+import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
+import { createSession, getSession, recordTypingSuccess } from '../sessions.js';
+
+const WORD_RE = /^[a-z'-]+$/;
+
+const normalize = (s) => String(s ?? '').trim().toLowerCase();
+
+// 输了但不对时，只告诉孩子「第几个字母再看看」——不泄露正确字母（需求 2.1）
+export function hintFor(typed, target) {
+  if (typed.length !== target.length) return { kind: 'length' };
+  for (let i = 0; i < typed.length; i++) {
+    if (typed[i] !== target[i]) return { kind: 'position', position: i + 1 };
+  }
+  return { kind: 'none' };
+}
+
+export function createSessionRouter(userDb, getDictDb) {
+  const router = Router();
+  const insertEvent = userDb.prepare(
+    `INSERT INTO events (profile_id, ts, session_id, mode, word, step, type, detail)
+     VALUES (?, ?, ?, ?, ?, 'typing', ?, ?)`
+  );
+  const logEvent = (profileId, sid, mode, word, type, detail) =>
+    insertEvent.run(profileId, new Date().toISOString(), sid ?? null, mode, word ?? null, type, detail ? JSON.stringify(detail) : null);
+
+  // 绑定目标词：英文入口在第 1 次查词命中后调用；中文入口在选中候选后调用。
+  // 服务端自己查词典确认这个词真实存在，不信客户端。
+  router.post('/session', (req, res) => {
+    const dictDb = getDictDb();
+    if (!dictDb) return res.status(503).json({ error: '词典还没建立' });
+
+    const profileId = req.profile.id;
+    const bundle = getProfileBundle(userDb, req.profile);
+    const required = LEVEL_COUNTS[bundle.effectiveLevel].typing;
+
+    const mode = req.body?.mode === 'zh' ? 'zh' : 'en';
+    const word = normalize(req.body?.word);
+    const sessionId = String(req.body?.sessionId ?? '');
+    if (!word || !WORD_RE.test(word) || !sessionId) {
+      return res.status(400).json({ error: '参数不对' });
     }
-    userDb
-      .prepare('UPDATE profiles SET settings_json = ? WHERE id = ?')
-      .run(JSON.stringify(overrides), profileId);
-    res.json({ ok: true, passScore: overrides.passScore ?? null });
+    const exists = dictDb.prepare('SELECT 1 FROM dict WHERE word_lower = ? LIMIT 1').get(word);
+    if (!exists) return res.status(404).json({ error: '词典里没有这个词' });
+
+    // 英文入口：孩子第 1 次输对了，算 1/N（需求 2.1）；中文入口从 0/N 开始（需求 2.6）
+    const counted = mode === 'en' ? 1 : 0;
+    const created = createSession(userDb, profileId, sessionId, { word, mode, counted });
+    if (!created.ok) {
+      // 同一个会话被换词：拒绝（防「给容易的词过关后改词看释义」）
+      return res.status(403).json({ error: '这个会话已经绑定了别的词，请重新开始' });
+    }
+
+    let session = created.session;
+    let done = session.typing_done === 1;
+    // 英文入口且 N=1：第 1 次输入就直接进入下一阶段
+    if (mode === 'en' && required <= 1 && !done) {
+      const r = recordTypingSuccess(userDb, profileId, session, required);
+      session = getSession(userDb, profileId, sessionId);
+      done = r.done;
+    }
+    const completed = Math.min(session.typing_count, required);
+    if (done) logEvent(profileId, sessionId, mode, word, 'typing_done', null);
+    logEvent(profileId, sessionId, mode, word, 'typing_ok', { completed });
+
+    res.json({ ok: true, word: session.word, mode: session.mode, completed, requiredCount: required, done });
+  });
+
+  // 提交一次输入：服务端自己比对并计数
+  router.post('/typing', (req, res) => {
+    const profileId = req.profile.id;
+    const bundle = getProfileBundle(userDb, req.profile);
+    const required = LEVEL_COUNTS[bundle.effectiveLevel].typing;
+
+    const sessionId = String(req.body?.sessionId ?? '');
+    const typed = normalize(req.body?.typed);
+    const session = getSession(userDb, profileId, sessionId);
+    if (!session || !session.word) {
+      return res.status(403).json({ error: '请先开始查这个词' });
+    }
+    if (!typed) return res.json({ ok: false, reason: 'empty' });
+    if (!WORD_RE.test(typed)) {
+      logEvent(profileId, sessionId, session.mode, session.word, 'typing_wrong', { reason: 'invalid_chars' });
+      return res.json({ ok: false, reason: 'invalid_chars' });
+    }
+    if (typed !== session.word) {
+      const hint = hintFor(typed, session.word);
+      logEvent(profileId, sessionId, session.mode, session.word, 'typing_wrong', hint);
+      return res.json({
+        ok: false,
+        reason: 'mismatch',
+        hint: hint.kind === 'length' ? 'length' : hint.kind === 'position' ? 'position' : 'none',
+        position: hint.position ?? null,
+      });
+    }
+
+    const r = recordTypingSuccess(userDb, profileId, session, required);
+    logEvent(profileId, sessionId, session.mode, session.word, 'typing_ok', { completed: r.completed });
+    if (r.done) logEvent(profileId, sessionId, session.mode, session.word, 'typing_done', null);
+    res.json({
+      ok: true,
+      completed: Math.min(r.completed, required),
+      requiredCount: required,
+      done: r.done,
+    });
   });
 
   return router;
@@ -5584,7 +5999,7 @@ export function createScoreRouter(userDb) {
 
 import { Router } from 'express';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
-import { getSession, upsertSession } from '../sessions.js';
+import { getSession, markMeaningShown, sessionUnlocksMeaning } from '../sessions.js';
 import {
   getVocabWord,
   getLearnedWord,
@@ -5631,7 +6046,9 @@ export function createVocabRouter(userDb, getDictDb) {
     );
   }
 
-  // 释义（需求 2.4）：只有完成跟读 / 求助通关 / 快速看过 / 已学会 才返回，否则 403。
+  // 释义（需求 2.4）：只有「本档案里已学会」或「本会话已完成输入 + 跟读达标/求助/快速查看」
+  // 才返回。**必须同时满足：同一个档案、同一个会话、会话绑定的就是这个词**——
+  // 否则「给 apple 通过后拿同一会话去问 banana 的释义」就能看遍整本字典（已实测的绕过）。
   router.get('/meaning/:word', (req, res) => {
     const profileId = req.profile.id;
     const bundle = getProfileBundle(userDb, req.profile);
@@ -5642,14 +6059,13 @@ export function createVocabRouter(userDb, getDictDb) {
     const learned = getLearnedWord(userDb, profileId, word);
     const session = getSession(userDb, profileId, req.get('X-Session-Id'));
     const m = LEVEL_COUNTS[bundle.effectiveLevel].reading;
-    const readComplete = session && (session.read_pass >= m || session.assisted === 1);
-    if (!learned && !readComplete && !(session && session.quick_peek === 1)) {
-      return res.status(403).json({ error: '要先完成跟读才能看释义哦' });
+    if (!learned && !sessionUnlocksMeaning(session, word, m)) {
+      return res.status(403).json({ error: '要先完成输入和跟读才能看释义哦' });
     }
 
     const lines = translationLines(dictDb, word, bundle.settings.meaningLines);
     logEvent(profileId, { sessionId: session?.session_id, word, type: 'meaning_shown', step: 'meaning' });
-    upsertSession(userDb, profileId, session?.session_id, { word, meaning_shown: 1 });
+    markMeaningShown(userDb, profileId, session);
     res.json({
       word,
       lines,
@@ -5746,8 +6162,8 @@ export function createVocabRouter(userDb, getDictDb) {
     }
     const session = getSession(userDb, req.profile.id, req.get('X-Session-Id'));
     const m = LEVEL_COUNTS[bundle.effectiveLevel].reading;
-    const readOk = session && (session.read_pass >= m || session.assisted === 1);
-    if (!readOk) {
+    // 与释义接口同一套判定：必须同一个会话、绑定同一个词、输入与跟读都达标
+    if (!sessionUnlocksMeaning(session, word, m)) {
       return res.status(403).json({ error: '要先完成输入和跟读' });
     }
     const updated = graduateWord(userDb, req.profile.id, word, {
@@ -6210,62 +6626,116 @@ export function decideOutcome(result, passScore) {
 ## 📄 server/sessions.js
 
 ````js
-// 学习会话进度（阶段 3 的服务器校验依据）：一个查词流程一行。
+// 学习会话：一次查词流程一行，是「读音 / 释义」门禁的唯一依据。
+//
+// 安全不变量（务必保持）：
+//   1. 会话绑定「档案 + 目标词」，创建后**不能改词**（换词必须开新会话）。
+//   2. 所有会放行门禁的字段（typing_done / read_pass / assisted / quick_peek）
+//      只能由下面这些明确函数写入，且只能由服务端在真实动作之后调用。
+//      路由里不要直接 UPDATE 这些列，也不要接受客户端上报的进度。
+//   3. 客户端上报的事件只进 events 表（审计），不改变这里的状态。
 
 const NOW = () => new Date().toISOString();
-
-export function upsertSession(userDb, profileId, sessionId, fields = {}) {
-  if (!sessionId) return;
-  const existing = userDb
-    .prepare('SELECT * FROM learn_sessions WHERE profile_id = ? AND session_id = ?')
-    .get(profileId, sessionId);
-  const now = NOW();
-  if (!existing) {
-    userDb
-      .prepare(
-        `INSERT INTO learn_sessions (profile_id, session_id, word, mode, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?)`
-      )
-      .run(profileId, String(sessionId).slice(0, 64), fields.word ?? null, fields.mode ?? 'en', now, now);
-  }
-  const sets = [];
-  const args = [];
-  for (const key of ['word', 'mode', 'typing_done', 'read_pass', 'read_fail', 'read_attempts', 'assisted', 'quick_peek', 'meaning_shown']) {
-    if (fields[key] !== undefined) {
-      sets.push(`${key} = ?`);
-      args.push(fields[key]);
-    }
-  }
-  if (!sets.length) return;
-  sets.push('updated_at = ?');
-  args.push(now, profileId, String(sessionId).slice(0, 64));
-  userDb
-    .prepare(`UPDATE learn_sessions SET ${sets.join(', ')} WHERE profile_id = ? AND session_id = ?`)
-    .run(...args);
-}
-
-// 事件驱动会话状态：某些事件类型直接推进会话进度。
-export function applyEventToSession(userDb, profileId, event) {
-  const { session_id: sid, type } = event;
-  if (!sid) return;
-  if (type === 'lookup_start') {
-    upsertSession(userDb, profileId, sid, { word: event.word, mode: event.mode });
-  } else if (type === 'typing_done') {
-    upsertSession(userDb, profileId, sid, { word: event.word, typing_done: 1 });
-  } else if (type === 'help_used') {
-    upsertSession(userDb, profileId, sid, { word: event.word, assisted: 1 });
-  } else if (type === 'quick_peek') {
-    upsertSession(userDb, profileId, sid, { word: event.word, quick_peek: 1 });
-  } else if (type === 'meaning_shown') {
-    upsertSession(userDb, profileId, sid, { word: event.word, meaning_shown: 1 });
-  }
-}
+const SID = (sessionId) => String(sessionId ?? '').slice(0, 64);
 
 export function getSession(userDb, profileId, sessionId) {
   if (!sessionId) return null;
   return userDb
     .prepare('SELECT * FROM learn_sessions WHERE profile_id = ? AND session_id = ?')
-    .get(profileId, String(sessionId).slice(0, 64));
+    .get(profileId, SID(sessionId));
+}
+
+// 建立会话并绑定目标词。同一个 (档案, 会话) 若已存在：
+//   - 词相同 → 原样返回（幂等）
+//   - 词不同 → 拒绝（这是防止「给容易的词过关 → 改成生僻词 → 看释义」的关键）
+export function createSession(userDb, profileId, sessionId, { word, mode = 'en', counted = 0 }) {
+  const id = SID(sessionId);
+  const target = String(word ?? '').trim().toLowerCase().slice(0, 64);
+  if (!id || !target) return { ok: false, reason: 'bad_request' };
+
+  const existing = getSession(userDb, profileId, id);
+  if (existing) {
+    if (existing.word !== target) return { ok: false, reason: 'word_mismatch', session: existing };
+    return { ok: true, session: existing, completed: existing.typing_count };
+  }
+
+  const now = NOW();
+  userDb
+    .prepare(
+      `INSERT INTO learn_sessions
+         (profile_id, session_id, word, mode, typing_count, typing_done, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, 0, ?, ?)`
+    )
+    .run(profileId, id, target, mode === 'zh' ? 'zh' : 'en', Math.max(0, counted), now, now);
+  return { ok: true, session: getSession(userDb, profileId, id), completed: Math.max(0, counted) };
+}
+
+function update(userDb, profileId, sessionId, sets, args) {
+  const id = SID(sessionId);
+  userDb
+    .prepare(`UPDATE learn_sessions SET ${sets.join(', ')}, updated_at = ? WHERE profile_id = ? AND session_id = ?`)
+    .run(...args, NOW(), profileId, id);
+}
+
+// 输入正确一次：服务端比对通过后调用，累加到 N 次就标记输入完成。
+export function recordTypingSuccess(userDb, profileId, session, requiredCount) {
+  const completed = session.typing_count + 1;
+  const done = completed >= Math.max(1, requiredCount);
+  update(
+    userDb,
+    profileId,
+    session.session_id,
+    ['typing_count = ?', 'typing_done = ?'],
+    [completed, done ? 1 : 0]
+  );
+  return { completed, done };
+}
+
+export function recordReadingPass(userDb, profileId, session, score) {
+  update(
+    userDb,
+    profileId,
+    session.session_id,
+    ['read_pass = read_pass + 1', 'read_attempts = read_attempts + 1', 'best_score = MAX(best_score, ?)'],
+    [score ?? 0]
+  );
+}
+
+export function recordReadingFail(userDb, profileId, session) {
+  update(userDb, profileId, session.session_id, ['read_fail = read_fail + 1', 'read_attempts = read_attempts + 1'], []);
+}
+
+// 求助通关：只有服务端确认「累计失败够数」才能调用（见 routes/child.js 的 /api/help）。
+export function useHelp(userDb, profileId, session) {
+  update(userDb, profileId, session.session_id, ['assisted = 1'], []);
+  return getSession(userDb, profileId, session.session_id);
+}
+
+// 快速查看：只有 /api/quick-peek 在校验过当天额度后能调用。
+export function useQuickPeek(userDb, profileId, session) {
+  update(userDb, profileId, session.session_id, ['quick_peek = 1'], []);
+  return getSession(userDb, profileId, session.session_id);
+}
+
+export function markMeaningShown(userDb, profileId, session) {
+  if (!session) return;
+  update(userDb, profileId, session.session_id, ['meaning_shown = 1'], []);
+}
+
+// 会话是否已经放行「释义」：必须同档案 + 同会话 + 同词，且输入与跟读都达标。
+export function sessionUnlocksMeaning(session, word, requiredReadingCount) {
+  if (!session) return false;
+  if (session.word !== String(word ?? '').trim().toLowerCase()) return false;
+  if (session.typing_done !== 1) return false;
+  if (session.assisted === 1 || session.quick_peek === 1) return true;
+  return session.read_pass >= requiredReadingCount;
+}
+
+// 会话是否已经放行「读音」：输入完成即可。
+export function sessionUnlocksPronunciation(session, word) {
+  if (!session) return false;
+  if (session.word !== String(word ?? '').trim().toLowerCase()) return false;
+  return session.typing_done === 1;
 }
 ````
 
@@ -6781,6 +7251,9 @@ export function makeCaller(app) {
       socket.destroy = () => {};
       socket.address = () => ({ port: 0 });
       socket.setTimeout = () => {};
+      // 让 req.ip / remoteAddress 看起来像本机（家长 PIN 首次设置只允许本机操作）。
+      // remoteAddress 是只读 getter，必须用 defineProperty 覆盖。
+      Object.defineProperty(socket, 'remoteAddress', { value: '127.0.0.1', configurable: true });
 
       const req = new http.IncomingMessage(socket);
       req.httpVersion = '1.1';
@@ -6804,7 +7277,14 @@ export function makeCaller(app) {
 
       const res = new http.ServerResponse(req);
       res.assignSocket(socket);
-      res.on('finish', () => {
+      // 未匹配到路由时 Express 可能直接销毁连接，不一定触发 finish —— 两个都接上
+      res.on('finish', done);
+      res.on('close', done);
+      let settled = false;
+
+      function done() {
+        if (settled) return;
+        settled = true;
         const raw = Buffer.concat(parts).toString('latin1');
         const sep = raw.indexOf('\r\n\r\n');
         const head = raw.slice(0, sep).split('\r\n');
@@ -6822,7 +7302,7 @@ export function makeCaller(app) {
           data = rawBody;
         }
         resolve({ status, headers: headerMap, data });
-      });
+      }
       res.on('error', reject);
 
       app.handle(req, res, (err) => {
@@ -6839,7 +7319,10 @@ export function makeCaller(app) {
 ## 📄 tests/integration.test.js
 
 ````js
-// 集成测试：直接打 HTTP API，验证阶段 2～5 的服务器行为与验收项。
+// 集成测试：直接打 HTTP API，验证正常流程与「门槛不可绕过」。
+//
+// 安全测试部分（本文件后半）是这次修复的重点：每一条都对应一个曾经真实存在的绕过路径。
+// 迷你测试词典只有 29 个词，用例只能用里面的词（见 tests/fixtures/mini-ecdict.csv）。
 
 import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
@@ -6852,6 +7335,7 @@ import { todayLocal } from '../server/vocab.js';
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wordlock-it-'));
 process.env.WORDLOCK_DATA_DIR = dataDir;
 process.env.SCORER = 'mock';
+process.env.WORDLOCK_DEV = '1'; // 允许测试用 mockScore 控制分数（正式使用不允许）
 process.env.NODE_ENV = 'test';
 
 const { openUserDb } = await import('../server/db.js');
@@ -6863,9 +7347,8 @@ const { default: Database } = await import('better-sqlite3');
 let userDb;
 let dictDb;
 let callRaw;
-let profileA; // 小学：门槛 1
-let profileB; // 初中：门槛 2
-let parentToken;
+let profileA; // 小学预设：输入 1 次
+let profileB; // 初中预设：输入 2 次
 
 const SID = () => crypto.randomUUID();
 
@@ -6877,8 +7360,7 @@ before(async () => {
 
   userDb = openUserDb();
   dictDb = new Database(path.join(dataDir, 'dict.db'), { readonly: true });
-  const app = createApp({ userDb, dictDb });
-  callRaw = makeCaller(app);
+  callRaw = makeCaller(createApp({ userDb, dictDb }));
 
   const a = await call('/api/profiles', { method: 'POST', body: { name: '测试A', avatar: '🐱', preset: 'primary' } });
   const b = await call('/api/profiles', { method: 'POST', body: { name: '测试B', avatar: '🐶', preset: 'middle' } });
@@ -6892,7 +7374,7 @@ after(() => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-async function call(pathname, { method = 'GET', body, profile, session, parent, noProfile } = {}) {
+async function call(pathname, { method = 'GET', body, profile, session, parent } = {}) {
   const headers = {};
   if (profile) headers['X-Profile-Id'] = String(profile);
   if (session) headers['X-Session-Id'] = session;
@@ -6900,278 +7382,408 @@ async function call(pathname, { method = 'GET', body, profile, session, parent, 
   return callRaw(pathname, { method, body, headers });
 }
 
-async function sendEvent(profile, sessionId, type, word, mode = 'en', step = 'typing') {
-  return call('/api/events', {
-    method: 'POST',
-    profile,
-    body: { sessionId, type, word, mode, step },
-  });
+/* ---------- 正常流程要用的服务端步骤（和前端调的是同一套接口） ---------- */
+
+async function bindAndType(profile, sessionId, word, mode = 'en') {
+  const bound = await call('/api/session', { method: 'POST', profile, body: { sessionId, word, mode } });
+  assert.equal(bound.status, 200, `绑定会话失败：${JSON.stringify(bound.data)}`);
+  let { completed, requiredCount, done } = bound.data;
+  while (!done) {
+    const r = await call('/api/typing', { method: 'POST', profile, body: { sessionId, typed: word } });
+    assert.equal(r.data.ok, true, `输入未通过：${JSON.stringify(r.data)}`);
+    completed = r.data.completed;
+    requiredCount = r.data.requiredCount;
+    done = r.data.done;
+    if (!done && completed >= requiredCount) break;
+  }
+  return { completed, requiredCount };
 }
 
-/* ---------- 阶段 2/3：跟读 → 释义 → 生词本 ---------- */
+async function readOnce(profile, sessionId, word, mockScore) {
+  const r = await call('/api/score', { method: 'POST', profile, body: { word, sessionId, mockScore } });
+  assert.equal(r.status, 200, `评分失败：${JSON.stringify(r.data)}`);
+  return r.data;
+}
 
-test('完整流程：输入完成 → 读音放行 → 跟读通过 → 释义放行 → 进生词本', async () => {
+async function readTimes(profile, sessionId, word, times, mockScore = 92) {
+  let last;
+  for (let i = 0; i < times; i++) last = await readOnce(profile, sessionId, word, mockScore);
+  return last;
+}
+
+async function newProfile(name, preset = 'primary') {
+  const r = await call('/api/profiles', { method: 'POST', body: { name, avatar: '🐸', preset } });
+  return r.data.id;
+}
+
+async function dropProfile(id) {
+  await call(`/api/parent/profiles/${id}`, { method: 'DELETE', parent: await getParent() });
+}
+
+/* ============ 正常流程（孩子实际会走到） ============ */
+
+test('完整流程：输入 → 读音放行 → 跟读通过 → 释义放行 → 进生词本', async () => {
   const sid = SID();
-  // 未完成输入时：读音与释义都是 403
-  const p403 = await call('/api/pronunciation/run', { profile: profileA, session: sid });
-  assert.equal(p403.status, 403);
-  const m403 = await call('/api/meaning/run', { profile: profileA, session: sid });
-  assert.equal(m403.status, 403);
+  assert.equal((await call('/api/pronunciation/run', { profile: profileA, session: sid })).status, 403);
+  assert.equal((await call('/api/meaning/run', { profile: profileA, session: sid })).status, 403);
 
   assert.equal((await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'run' } })).data.exists, true);
-  await sendEvent(profileA, sid, 'lookup_start', 'run');
-  await sendEvent(profileA, sid, 'typing_done', 'run');
+  await bindAndType(profileA, sid, 'run');
 
   const pron = await call('/api/pronunciation/run', { profile: profileA, session: sid });
   assert.equal(pron.status, 200);
-  assert.equal(pron.data.word, 'run');
   assert.ok(pron.data.phonetic.length > 0);
+  assert.equal((await call('/api/meaning/run', { profile: profileA, session: sid })).status, 403); // 跟读前仍锁着
 
-  // 跟读通过（小学门槛 1 次）
-  const score = await call('/api/score', {
-    method: 'POST', profile: profileA, session: sid,
-    body: { word: 'run', sessionId: sid, mockScore: 90 },
-  });
-  assert.equal(score.data.passed, true);
-  assert.ok(score.data.score >= 60);
+  const score = await readOnce(profileA, sid, 'run', 92);
+  assert.equal(score.passed, true);
+  assert.equal(score.passes, 1);
 
   const meaning = await call('/api/meaning/run', { profile: profileA, session: sid });
   assert.equal(meaning.status, 200);
   assert.ok(meaning.data.lines.length >= 1);
+  assert.ok((await call('/api/vocab', { profile: profileA })).data.words.some((w) => w.word === 'run' && w.status === 'learned'));
+  assert.ok(!(await call('/api/vocab', { profile: profileB })).data.words.some((w) => w.word === 'run'));
+});
 
-  const vocabA = await call('/api/vocab', { profile: profileA });
-  assert.ok(vocabA.data.words.some((w) => w.word === 'run' && w.status === 'learned'));
-  // 另一个档案看不到
-  const vocabB = await call('/api/vocab', { profile: profileB });
-  assert.ok(!vocabB.data.words.some((w) => w.word === 'run'));
+test('输入次数按门槛档位来（小学 1 次、初中 2 次）', async () => {
+  const sid1 = SID();
+  const r1 = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid1, word: 'book', mode: 'en' } });
+  assert.equal(r1.data.requiredCount, 1);
+  assert.equal(r1.data.done, true); // N=1：第 1 次输入即完成
+
+  const sid2 = SID();
+  const r2 = await call('/api/session', { method: 'POST', profile: profileB, body: { sessionId: sid2, word: 'book', mode: 'en' } });
+  assert.equal(r2.data.requiredCount, 2);
+  assert.equal(r2.data.done, false);
+  const r3 = await call('/api/typing', { method: 'POST', profile: profileB, body: { sessionId: sid2, typed: 'book' } });
+  assert.equal(r3.data.done, true);
+});
+
+test('输入错误由服务端指出位置，且不计数', async () => {
+  const sid = SID();
+  await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'happy', mode: 'zh' } });
+  const wrongLength = await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid, typed: 'happpy' } });
+  assert.equal(wrongLength.data.ok, false);
+  assert.equal(wrongLength.data.hint, 'length');
+  const wrongPos = await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid, typed: 'hoppy' } });
+  assert.equal(wrongPos.data.hint, 'position');
+  assert.equal(wrongPos.data.position, 2);
+  assert.equal(wrongPos.data.completed, undefined); // 没计数
+});
+
+test('中文入口从 0/N 开始', async () => {
+  const sid = SID();
+  const zh = await call('/api/search-zh', { method: 'POST', profile: profileA, body: { query: '跑' } });
+  assert.equal(zh.data.results[0].word, 'run');
+  const bound = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'run', mode: 'zh' } });
+  assert.equal(bound.data.completed, 0);
+  assert.equal(bound.data.done, false);
 });
 
 test('没过关就请求释义返回 403（阶段3 验收）', async () => {
   const sid = SID();
-  await sendEvent(profileA, sid, 'typing_done', 'happy');
-  const score = await call('/api/score', {
-    method: 'POST', profile: profileA, session: sid,
-    body: { word: 'happy', sessionId: sid, mockScore: 10 }, // 不及格
-  });
-  assert.equal(score.data.passed, false);
-  const m = await call('/api/meaning/happy', { profile: profileA, session: sid });
-  assert.equal(m.status, 403);
-  const row = userDb.prepare('SELECT * FROM vocab WHERE profile_id = ? AND word = ?').get(profileA, 'happy');
-  assert.equal(row, undefined); // 没通关不进生词本
+  await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'dog' } });
+  await bindAndType(profileA, sid, 'dog');
+  assert.equal((await readOnce(profileA, sid, 'dog', 10)).passed, false);
+  assert.equal((await call('/api/meaning/dog', { profile: profileA, session: sid })).status, 403);
+  assert.equal(userDb.prepare('SELECT * FROM vocab WHERE profile_id = ? AND word = ?').get(profileA, 'dog'), undefined);
 });
 
 test('已学会的词免门槛：check-word 返回 learned，释义直接可看（2.8）', async () => {
-  const cw = await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'run' } });
-  assert.equal(cw.data.learned, true);
+  assert.equal((await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'run' } })).data.learned, true);
   const m = await call('/api/meaning/run', { profile: profileA, session: SID() });
   assert.equal(m.status, 200);
   assert.ok(m.data.learnedDaysAgo != null);
-  // 另一个档案没有学会
-  const cwB = await call('/api/check-word', { method: 'POST', profile: profileB, body: { word: 'run' } });
-  assert.equal(cwB.data.learned, false);
+  assert.equal((await call('/api/check-word', { method: 'POST', profile: profileB, body: { word: 'run' } })).data.learned, false);
 });
 
 test('中文候选标记已学会（2.8）', async () => {
   const zh = await call('/api/search-zh', { method: 'POST', profile: profileA, body: { query: '跑' } });
-  const run = zh.data.results.find((r) => r.word === 'run');
-  assert.ok(run);
-  assert.equal(run.learned, true);
+  assert.equal(zh.data.results.find((r) => r.word === 'run').learned, true);
 });
 
-test('读不够次数不能看释义；求助通关可以（阶段2/3）', async () => {
-  // 初中档案：跟读门槛 2 次
+test('读够 M 次才能看释义；求助通关也可以（阶段2/3）', async () => {
   const sid = SID();
-  await sendEvent(profileB, sid, 'typing_done', 'book');
-  await call('/api/score', { method: 'POST', profile: profileB, session: sid, body: { word: 'book', sessionId: sid, mockScore: 95 } });
-  const m1 = await call('/api/meaning/book', { profile: profileB, session: sid });
-  assert.equal(m1.status, 403);
-  // 求助通关
-  await sendEvent(profileB, sid, 'help_used', 'book');
-  const m2 = await call('/api/meaning/book', { profile: profileB, session: sid });
-  assert.equal(m2.status, 200);
+  await bindAndType(profileB, sid, 'book');
+  await readOnce(profileB, sid, 'book', 92);
+  assert.equal((await call('/api/meaning/book', { profile: profileB, session: sid })).status, 403); // 初中要 2 次
+
+  for (let i = 0; i < 4; i++) await readOnce(profileB, sid, 'book', 5);
+  const help = await call('/api/help', { method: 'POST', profile: profileB, body: { word: 'book', sessionId: sid } });
+  assert.equal(help.status, 200);
+  assert.equal((await call('/api/meaning/book', { profile: profileB, session: sid })).status, 200);
   const row = userDb.prepare('SELECT * FROM vocab WHERE profile_id = ? AND word = ?').get(profileB, 'book');
   assert.equal(row.assisted, 1);
-  assert.ok(row.next_review_at); // 求助通关也进生词本
-  // assisted 额外一轮复习：间隔 1,2,7 + 8
-  const { effectiveIntervals } = await import('../server/vocab.js');
-  assert.equal(effectiveIntervals(row, { reviewIntervals: [1, 2, 7] }).length, 4);
+  assert.ok(row.next_review_at);
 });
 
-test('首次校准：平均分 −15，夹在 50–75（阶段2）', async () => {
-  const res = await call('/api/calibration', { method: 'POST', profile: profileB, body: { scores: [70, 80, 90] } });
-  assert.equal(res.data.passScore, 65);
-  const settings = await call('/api/settings', { profile: profileB });
-  assert.equal(settings.data.settings.calibrated, true);
+test('首次校准：分数由服务端记录并计算，夹在 50–75（阶段2）', async () => {
+  const sid = SID();
+  await call('/api/calibration/start', { method: 'POST', profile: profileB });
+  for (const score of [70, 80, 90]) {
+    const r = await call('/api/score', { method: 'POST', profile: profileB, body: { word: 'apple', sessionId: sid, mockScore: score, calibration: true } });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.calibration, true);
+  }
+  const done = await call('/api/calibration/finish', { method: 'POST', profile: profileB });
+  assert.equal(done.data.passScore, 65); // 平均 80 − 15
+  assert.equal(done.data.usedSamples, 3);
+  assert.equal((await call('/api/settings', { profile: profileB })).data.settings.calibrated, true);
 });
-
-/* ---------- 阶段 3：复习调度 ---------- */
 
 test('复习：答错退回并明天再考；答对进入下一间隔（阶段3）', async () => {
-  // 把 run 的复习安排到今天
   userDb.prepare("UPDATE vocab SET next_review_at = ? WHERE profile_id = ? AND word = 'run'").run(todayLocal(0), profileA);
-  const today = await call('/api/review/today', { profile: profileA });
-  assert.ok(today.data.words.some((w) => w.word === 'run'));
-  assert.ok(today.data.words.length <= 3); // reviewPerDay = 3
+  assert.ok((await call('/api/review/today', { profile: profileA })).data.words.some((w) => w.word === 'run'));
 
   let ans = await call('/api/review/answer', { method: 'POST', profile: profileA, body: { word: 'run', typed: 'rnu' } });
   assert.equal(ans.data.correct, false);
-  assert.equal(ans.data.nextReviewAt, todayLocal(1)); // 第二天再考
+  assert.equal(ans.data.nextReviewAt, todayLocal(1));
   ans = await call('/api/review/answer', { method: 'POST', profile: profileA, body: { word: 'run', typed: 'run' } });
   assert.equal(ans.data.correct, true);
-  assert.equal(ans.data.nextReviewAt, todayLocal(2)); // 进入间隔 [1,2,7] 的第 2 个
-  // 填回今天的到期时间，供下一个测试用
+  assert.equal(ans.data.nextReviewAt, todayLocal(2));
   userDb.prepare("UPDATE vocab SET next_review_at = ?, stage = 0 WHERE profile_id = ? AND word = 'run'").run(todayLocal(0), profileA);
 });
 
 test('复习每天最多 reviewPerDay 个（阶段3）', async () => {
+  const pid = await newProfile('复习上限测试');
   const ins = userDb.prepare(
-    `INSERT INTO vocab (profile_id, word, status, first_learned_at, next_review_at)
-     VALUES (?, ?, 'learned', ?, ?)`
+    `INSERT INTO vocab (profile_id, word, status, first_learned_at, next_review_at) VALUES (?, ?, 'learned', ?, ?)`
   );
   const now = new Date().toISOString();
-  for (const w of ['paper', 'pen', 'pencil', 'rain', 'sun']) {
-    ins.run(profileA, w, now, todayLocal(0));
-  }
-  const today = await call('/api/review/today', { profile: profileA });
-  assert.ok(today.data.words.length <= 3);
+  for (const w of ['paper', 'pen', 'pencil', 'rain', 'sun']) ins.run(pid, w, now, todayLocal(0));
+  const today = await call('/api/review/today', { profile: pid });
   assert.equal(today.data.words.length, 3);
+  await dropProfile(pid);
 });
 
-/* ---------- 阶段 5：快速查看 ---------- */
+test('快速查看：默认关闭；打开后限额生效；巩固后转正（阶段5）', async () => {
+  const pid = await newProfile('快速查看测试');
+  const sid0 = SID();
+  await bindAndType(pid, sid0, 'water');
+  assert.equal((await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'water', sessionId: sid0 } })).status, 403); // 默认关闭
 
-test('快速查看：默认关闭；打开后限额生效；pending 不免门槛（阶段5）', async () => {
-  // 默认关闭
-  const qp0 = await call('/api/quick-peek', { method: 'POST', profile: profileA, session: SID(), body: { word: 'water' } });
-  assert.equal(qp0.status, 403);
-
-  // 家长设置 2 次/天
-  await call(`/api/parent/profiles/${profileA}/settings`, {
-    method: 'POST', parent: await getParent(), body: { quickPeekPerDay: 2 },
-  });
+  await call(`/api/parent/profiles/${pid}/settings`, { method: 'POST', parent: await getParent(), body: { quickPeekPerDay: 2 } });
 
   const sid1 = SID();
-  const peek1 = await call('/api/quick-peek', { method: 'POST', profile: profileA, session: sid1, body: { word: 'water' } });
+  await bindAndType(pid, sid1, 'water');
+  const peek1 = await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'water', sessionId: sid1 } });
   assert.equal(peek1.status, 200);
   assert.equal(peek1.data.remaining, 1);
-  assert.ok(peek1.data.lines.length >= 1);
-  assert.equal(userDb.prepare('SELECT status FROM vocab WHERE profile_id = ? AND word = ?').get(profileA, 'water')?.status, 'pending');
+  assert.equal(userDb.prepare('SELECT status FROM vocab WHERE profile_id = ? AND word = ?').get(pid, 'water')?.status, 'pending');
 
-  await call('/api/quick-peek', { method: 'POST', profile: profileA, session: SID(), body: { word: 'moon' } });
-  const peek3 = await call('/api/quick-peek', { method: 'POST', profile: profileA, session: SID(), body: { word: 'star' } });
-  assert.equal(peek3.status, 403);
-
-  // pending 的词不免门槛：直接要释义被拒（water 的 peek 会话除外）
-  const stranger = await call('/api/meaning/water', { profile: profileA, session: SID() });
-  assert.equal(stranger.status, 403);
-
-  // 待巩固：完整过输入 + 跟读 → 跟读通关时自动转 learned
   const sid2 = SID();
-  await sendEvent(profileA, sid2, 'typing_done', 'water');
-  await call('/api/score', { method: 'POST', profile: profileA, session: sid2, body: { word: 'water', sessionId: sid2, mockScore: 88 } });
-  assert.equal(userDb.prepare('SELECT status FROM vocab WHERE profile_id = ? AND word = ?').get(profileA, 'water')?.status, 'learned');
+  await bindAndType(pid, sid2, 'moon');
+  assert.equal((await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'moon', sessionId: sid2 } })).status, 200);
+  const sid3 = SID();
+  await bindAndType(pid, sid3, 'star');
+  assert.equal((await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'star', sessionId: sid3 } })).status, 403); // 额度用完
 
-  // 兜底接口：没跟读就被拒绝（403）
-  const notReady = await call('/api/pending/moon/complete', { method: 'POST', profile: profileA, session: SID() });
-  assert.equal(notReady.status, 403);
-  const status = await call('/api/pending/water/status', { profile: profileA });
-  assert.equal(status.data.status, 'learned');
+  await readTimes(pid, sid1, 'water', 1, 88); // 完整过一遍 → 转 learned
+  assert.equal(userDb.prepare('SELECT status FROM vocab WHERE profile_id = ? AND word = ?').get(pid, 'water')?.status, 'learned');
+  await dropProfile(pid);
 });
 
-/* ---------- 阶段 4：每日上限 + 家长模式 ---------- */
-
 test('每日查词上限：达到后不能再开始新的词（阶段4）', async () => {
-  await call(`/api/parent/profiles/${profileA}/settings`, {
-    method: 'POST', parent: await getParent(), body: { dailyLookupLimit: 1 },
-  });
-  const cw1 = await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'sun' } });
-  assert.equal(cw1.data.allowed, true);
-  await sendEvent(profileA, SID(), 'typing_ok', 'sun');
-  const cw2 = await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'moon' } });
-  assert.equal(cw2.data.allowed, false);
-  // 复习不受影响
-  const today = await call('/api/review/today', { profile: profileA });
-  assert.equal(today.status, 200);
+  const pid = await newProfile('限额测试');
+  await call(`/api/parent/profiles/${pid}/settings`, { method: 'POST', parent: await getParent(), body: { dailyLookupLimit: 1 } });
+  assert.equal((await call('/api/check-word', { method: 'POST', profile: pid, body: { word: 'sun' } })).data.allowed, true);
+  await bindAndType(pid, SID(), 'sun');
+  assert.equal((await call('/api/check-word', { method: 'POST', profile: pid, body: { word: 'moon' } })).data.allowed, false);
+  assert.equal((await call('/api/review/today', { profile: pid })).status, 200); // 复习不受影响
+  await dropProfile(pid);
 });
 
 let cachedParent = null;
 async function getParent() {
   if (cachedParent) return cachedParent;
   const has = await call('/api/parent/has-pin', { noProfile: true });
-  let token;
-  if (!has.data.hasPin) {
-    token = (await call('/api/parent/pin', { method: 'POST', noProfile: true, body: { pin: '135790' } })).data.token;
-  } else {
-    token = (await call('/api/parent/login', { method: 'POST', noProfile: true, body: { pin: '135790' } })).data.token;
-  }
-  cachedParent = token;
-  return token;
+  cachedParent = has.data.hasPin
+    ? (await call('/api/parent/login', { method: 'POST', noProfile: true, body: { pin: '135790' } })).data.token
+    : (await call('/api/parent/pin', { method: 'POST', noProfile: true, body: { pin: '135790' } })).data.token;
+  return cachedParent;
 }
 
 test('家长模式：PIN 校验、改名、删除档案（阶段4）', async () => {
-  // 没有令牌不能进家长接口
-  const denied = await call('/api/parent/records?profile=1');
-  assert.equal(denied.status, 401);
-
-  const wrong = await call('/api/parent/login', { method: 'POST', noProfile: true, body: { pin: '000000' } });
-  assert.equal(wrong.status, 403);
-
+  assert.equal((await call('/api/parent/records?profile=1')).status, 401);
+  assert.equal((await call('/api/parent/login', { method: 'POST', noProfile: true, body: { pin: '000000' } })).status, 403);
   const token = await getParent();
   assert.ok(token);
 
-  const rename = await call(`/api/parent/profiles/${profileB}`, {
-    method: 'POST', parent: token, body: { name: '改个名' },
-  });
-  assert.equal(rename.status, 200);
-  const list = await call('/api/profiles');
-  assert.ok(list.data.profiles.some((p) => p.id === profileB && p.name === '改个名'));
+  assert.equal((await call(`/api/parent/profiles/${profileB}`, { method: 'POST', parent: token, body: { name: '改个名' } })).status, 200);
+  assert.ok((await call('/api/profiles')).data.profiles.some((p) => p.id === profileB && p.name === '改个名'));
 
-  // 删除档案连带数据
-  const del = await call(`/api/parent/profiles/${profileB}`, { method: 'DELETE', parent: token });
-  assert.equal(del.status, 200);
+  assert.equal((await call(`/api/parent/profiles/${profileB}`, { method: 'DELETE', parent: token })).status, 200);
   assert.equal(userDb.prepare('SELECT COUNT(*) n FROM events WHERE profile_id = ?').get(profileB).n, 0);
   assert.equal(userDb.prepare('SELECT COUNT(*) n FROM vocab WHERE profile_id = ?').get(profileB).n, 0);
-  // 把 profileB 标记为已删除，后续没有用到它的测试
   profileB = -1;
 });
 
+test('家长 PIN：连续输错会被临时锁定', async () => {
+  for (let i = 0; i < 5; i++) await call('/api/parent/login', { method: 'POST', noProfile: true, body: { pin: '000001' } });
+  const locked = await call('/api/parent/login', { method: 'POST', noProfile: true, body: { pin: '135790' } });
+  assert.equal(locked.status, 429); // 正确密码也要等锁定结束
+  // 清掉锁定，后面的测试还要用令牌
+  userDb.prepare("UPDATE meta SET value = '0' WHERE key IN ('pin_fails','pin_locked_until')").run();
+  assert.equal((await call('/api/parent/login', { method: 'POST', noProfile: true, body: { pin: '135790' } })).status, 200);
+});
+
 test('家长汇总：放弃点统计与 events 一致（阶段4 / 2.10）', async () => {
-  const token = await getParent();
-  // 造一个 11 分钟前放弃的流程（没到 meaning_shown）
   const old = new Date(Date.now() - 11 * 60 * 1000).toISOString();
   userDb.prepare(
     `INSERT INTO events (profile_id, ts, session_id, mode, word, step, type)
-     VALUES (?, ?, ?, 'en', 'quixotic', 'reading', 'read_fail')`
-  ).run(profileA, old, 'abandoned-session');
-
-  const summary = await call(`/api/parent/summary?profile=${profileA}`, { parent: token });
+     VALUES (?, ?, 'abandoned-session', 'en', 'quixotic', 'reading', 'read_fail')`
+  ).run(profileA, old);
+  const summary = await call(`/api/parent/summary?profile=${profileA}`, { parent: await getParent() });
   assert.equal(summary.status, 200);
   assert.ok(summary.data.lookedUp >= 1);
   assert.ok(summary.data.giveUp.total >= 1);
   assert.ok(summary.data.giveUp.conclusion.length > 0);
-  assert.ok(['typing', 'candidates', 'reading', 'meaning', 'review'].includes(Object.keys(summary.data.giveUp.byStep)[0]));
 });
 
 test('记录接口可按日期筛选（阶段4）', async () => {
-  const token = await getParent();
-  const today = new Date();
-  const y = today.getFullYear();
-  const m = String(today.getMonth() + 1).padStart(2, '0');
-  const d = String(today.getDate()).padStart(2, '0');
-  const res = await call(`/api/parent/records?profile=${profileA}&date=${y}-${m}-${d}`, { parent: token });
+  const d = new Date();
+  const day = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const res = await call(`/api/parent/records?profile=${profileA}&date=${day}`, { parent: await getParent() });
   assert.equal(res.status, 200);
   assert.ok(res.data.records.length >= 1);
 });
 
 test('生态接口：stats / garden / theme', async () => {
-  const stats = await call('/api/stats', { profile: profileA });
-  assert.ok(stats.data.totalDays >= 1);
-  const garden = await call('/api/garden', { profile: profileA });
-  assert.ok(garden.data.total >= 1);
-  assert.equal(garden.data.familyEnabled, false);
-  const theme = await call('/api/theme', { method: 'POST', profile: profileA, body: { theme: 'garden' } });
-  assert.equal(theme.data.theme, 'garden');
-  const settings = await call('/api/settings', { profile: profileA });
-  assert.equal(settings.data.settings.theme, 'garden');
+  assert.ok((await call('/api/stats', { profile: profileA })).data.totalDays >= 1);
+  assert.ok((await call('/api/garden', { profile: profileA })).data.total >= 1);
+  assert.equal((await call('/api/garden', { profile: profileA })).data.familyEnabled, false);
+  assert.equal((await call('/api/theme', { method: 'POST', profile: profileA, body: { theme: 'garden' } })).data.theme, 'garden');
+  assert.equal((await call('/api/settings', { profile: profileA })).data.settings.theme, 'garden');
+});
+
+/* ============ 安全回归：这些路径以前真的能绕过门槛 ============ */
+
+test('安全 1：没完成输入就不能跟读（直接调 /api/score 也会被拒）', async () => {
+  const r = await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'computer', sessionId: SID(), mockScore: 100 } });
+  assert.equal(r.status, 403);
+});
+
+test('安全 2：会话绑定了 apple，就不能拿它给 banana 评分', async () => {
+  const sid = SID();
+  await bindAndType(profileA, sid, 'apple');
+  assert.equal((await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'banana', sessionId: sid, mockScore: 100 } })).status, 403);
+});
+
+test('安全 3【已实测的绕过】：给一个词通过后，同一会话不能拿别的词的释义', async () => {
+  const sid = SID();
+  await bindAndType(profileA, sid, 'teacher');
+  await readOnce(profileA, sid, 'teacher', 95);
+  assert.equal((await call('/api/meaning/teacher', { profile: profileA, session: sid })).status, 200);
+  // 以前这里会返回 200，等于一次通过就能看遍整本字典
+  assert.equal((await call('/api/meaning/school', { profile: profileA, session: sid })).status, 403);
+  assert.equal((await call('/api/meaning/quixotic', { profile: profileA, session: sid })).status, 403);
+});
+
+test('安全 4【已实测的绕过】：伪造 help_used 事件不再能通关', async () => {
+  const sid = SID();
+  await bindAndType(profileA, sid, 'student');
+  const forged = await call('/api/events', {
+    method: 'POST', profile: profileA,
+    body: { sessionId: sid, type: 'help_used', word: 'student', mode: 'en', step: 'reading' },
+  });
+  assert.equal(forged.status, 200); // 接口正常返回（只记录）
+  assert.equal(userDb.prepare('SELECT assisted FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(profileA, sid).assisted, 0);
+  assert.equal((await call('/api/meaning/student', { profile: profileA, session: sid })).status, 403);
+  assert.equal(userDb.prepare('SELECT * FROM vocab WHERE profile_id = ? AND word = ?').get(profileA, 'student'), undefined);
+});
+
+test('安全 5：伪造 quick_peek / typing_done / read_pass 事件同样无效', async () => {
+  const sid = SID();
+  for (const type of ['quick_peek', 'typing_done', 'read_pass', 'meaning_shown']) {
+    await call('/api/events', { method: 'POST', profile: profileA, body: { sessionId: sid, type, word: 'sister', mode: 'en' } });
+  }
+  assert.equal(userDb.prepare('SELECT * FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(profileA, sid), undefined);
+  assert.equal((await call('/api/meaning/sister', { profile: profileA, session: sid })).status, 403);
+});
+
+test('安全 6：没读够次数不能求助，读够了才能', async () => {
+  const sid = SID();
+  await bindAndType(profileA, sid, 'school');
+  assert.equal((await call('/api/help', { method: 'POST', profile: profileA, body: { word: 'school', sessionId: sid } })).status, 403);
+  await readOnce(profileA, sid, 'school', 5);
+  assert.equal((await call('/api/help', { method: 'POST', profile: profileA, body: { word: 'school', sessionId: sid } })).status, 403);
+  for (let i = 0; i < 3; i++) await readOnce(profileA, sid, 'school', 5);
+  assert.equal((await call('/api/help', { method: 'POST', profile: profileA, body: { word: 'school', sessionId: sid } })).status, 200);
+});
+
+test('安全 7：会话绑定后不能改词（换词必须新会话）', async () => {
+  const sid = SID();
+  await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'friend', mode: 'en' } });
+  assert.equal((await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'quixotic', mode: 'en' } })).status, 403);
+  assert.equal(userDb.prepare('SELECT word FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(profileA, sid).word, 'friend');
+});
+
+test('安全 8：跨档案拿不到别人的会话状态', async () => {
+  const other = await newProfile('跨档案测试');
+  const sid = SID();
+  await bindAndType(other, sid, 'moon');
+  await readOnce(other, sid, 'moon', 95);
+  assert.equal((await call('/api/meaning/moon', { profile: other, session: sid })).status, 200);
+  assert.equal((await call('/api/meaning/moon', { profile: profileA, session: sid })).status, 403); // 换档案必须 403
+  await dropProfile(other);
+});
+
+test('安全 9：快速查看不能跨词使用', async () => {
+  await call(`/api/parent/profiles/${profileA}/settings`, { method: 'POST', parent: await getParent(), body: { quickPeekPerDay: 5 } });
+  const sid = SID();
+  await bindAndType(profileA, sid, 'star');
+  assert.equal((await call('/api/quick-peek', { method: 'POST', profile: profileA, body: { word: 'quixotic', sessionId: sid } })).status, 403);
+});
+
+test('安全 10：读音接口也不能跨词', async () => {
+  const sid = SID();
+  await bindAndType(profileA, sid, 'family');
+  assert.equal((await call('/api/pronunciation/family', { profile: profileA, session: sid })).status, 200);
+  assert.equal((await call('/api/pronunciation/quixotic', { profile: profileA, session: sid })).status, 403);
+});
+
+test('安全 11：客户端伪造校准分数无效（分数线只由服务端算）', async () => {
+  const pid = await newProfile('校准测试', 'middle');
+  const before = (await call('/api/settings', { profile: pid })).data.settings.passScore;
+
+  assert.equal((await call('/api/calibration', { method: 'POST', profile: pid, body: { scores: [5, 5, 5] } })).status, 404); // 老接口已移除
+
+  await call('/api/calibration/start', { method: 'POST', profile: pid });
+  const done = await call('/api/calibration/finish', { method: 'POST', profile: pid, body: { scores: [5, 5, 5] } });
+  assert.equal(done.data.passScore, null); // 一个有效样本都没有 → 不采用
+  assert.equal(done.data.usedSamples, 0);
+  assert.equal((await call('/api/settings', { profile: pid })).data.settings.passScore, before); // 分数线没被改动
+  await dropProfile(pid);
+});
+
+test('安全 12：非开发模式下 mockScore 无效', async () => {
+  const sid = SID();
+  await bindAndType(profileA, sid, 'father');
+  const prev = process.env.WORDLOCK_DEV;
+  delete process.env.WORDLOCK_DEV;
+  try {
+    const r = await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'father', sessionId: sid, mockScore: 5 } });
+    assert.equal(r.status, 200);
+    assert.notEqual(r.data.score, 5); // 客户端给的 5 分被忽略
+  } finally {
+    process.env.WORDLOCK_DEV = prev;
+  }
+});
+
+test('安全 13：缺音频时给友好提示而不是服务器报错', async () => {
+  const sid = SID();
+  await bindAndType(profileA, sid, 'mother');
+  const prev = process.env.WORDLOCK_DEV;
+  delete process.env.WORDLOCK_DEV;
+  try {
+    const r = await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'mother', sessionId: sid } });
+    assert.equal(r.status, 200);
+    assert.equal(r.data.error, 'too_quiet');
+    assert.equal(r.data.retry, true);
+  } finally {
+    process.env.WORDLOCK_DEV = prev;
+  }
 });
 ````
 

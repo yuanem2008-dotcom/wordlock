@@ -7,12 +7,36 @@ import { openDictDb, openUserDb } from './db.js';
 import { createDictRouter } from './routes/dict.js';
 import { createProfileRouter, createProfileMiddleware } from './routes/profile.js';
 import { createEventsRouter } from './routes/events.js';
+import { createSessionRouter } from './routes/session.js';
 import { createScoreRouter } from './routes/score.js';
 import { createVocabRouter } from './routes/vocab.js';
 import { createChildRouter } from './routes/child.js';
 import { createParentRouter } from './routes/parent.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// 启动前的评测配置检查：宁可起不来，也不要让孩子在用"随便念都能过"的模拟打分。
+// 返回 null 表示没问题，否则返回一段中文说明。
+export function scorerConfigProblem() {
+  const name = (process.env.SCORER || 'mock').toLowerCase();
+  const dev = (process.env.WORDLOCK_DEV ?? '') === '1';
+  if (name === 'mock' && !dev) {
+    return (
+      '当前用的是"模拟打分"（SCORER=mock），孩子随便念都能通过，不能这样给孩子用。\n' +
+      '  ① 正式使用：在 .env 里填好密钥并设 SCORER=xunfei\n' +
+      '  ② 只是自己调试：在 .env 里加一行 WORDLOCK_DEV=1（明确声明这是开发模式）'
+    );
+  }
+  if (name === 'xunfei') {
+    const missing = ['XUNFEI_APP_ID', 'XUNFEI_API_KEY', 'XUNFEI_API_SECRET'].filter((k) => !process.env[k]);
+    if (missing.length) return `SCORER=xunfei，但 .env 里缺：${missing.join('、')}`;
+  }
+  if (name === 'tencent') {
+    const missing = ['TENCENT_SECRET_ID', 'TENCENT_SECRET_KEY'].filter((k) => !process.env[k]);
+    if (missing.length) return `SCORER=tencent，但 .env 里缺：${missing.join('、')}`;
+  }
+  return null;
+}
 
 export function createApp({ userDb, dictDb }) {
   const app = express();
@@ -25,11 +49,16 @@ export function createApp({ userDb, dictDb }) {
   app.use('/api', createParentRouter(userDb));
   // 之后的接口都需要已选择档案
   app.use('/api', requireProfile);
+  // 所有正常接口
   app.use('/api', createEventsRouter(userDb));
+  app.use('/api', createSessionRouter(userDb, () => dictDb));
   app.use('/api', createScoreRouter(userDb));
   app.use('/api', createVocabRouter(userDb, () => dictDb));
   app.use('/api', createChildRouter(userDb, () => dictDb));
   app.use('/api', createDictRouter({ getDictDb: () => dictDb, userDb }));
+
+  // 没匹配到的接口：明确返回 JSON 404（而不是 HTML 错误页，也避免请求挂住）
+  app.use('/api', (req, res) => res.status(404).json({ error: '没有这个接口' }));
 
   app.use((err, req, res, next) => {
     console.error(err);

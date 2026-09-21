@@ -2,7 +2,7 @@
 
 import { Router } from 'express';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
-import { getSession, upsertSession } from '../sessions.js';
+import { getSession, markMeaningShown, sessionUnlocksMeaning } from '../sessions.js';
 import {
   getVocabWord,
   getLearnedWord,
@@ -49,7 +49,9 @@ export function createVocabRouter(userDb, getDictDb) {
     );
   }
 
-  // 释义（需求 2.4）：只有完成跟读 / 求助通关 / 快速看过 / 已学会 才返回，否则 403。
+  // 释义（需求 2.4）：只有「本档案里已学会」或「本会话已完成输入 + 跟读达标/求助/快速查看」
+  // 才返回。**必须同时满足：同一个档案、同一个会话、会话绑定的就是这个词**——
+  // 否则「给 apple 通过后拿同一会话去问 banana 的释义」就能看遍整本字典（已实测的绕过）。
   router.get('/meaning/:word', (req, res) => {
     const profileId = req.profile.id;
     const bundle = getProfileBundle(userDb, req.profile);
@@ -60,14 +62,13 @@ export function createVocabRouter(userDb, getDictDb) {
     const learned = getLearnedWord(userDb, profileId, word);
     const session = getSession(userDb, profileId, req.get('X-Session-Id'));
     const m = LEVEL_COUNTS[bundle.effectiveLevel].reading;
-    const readComplete = session && (session.read_pass >= m || session.assisted === 1);
-    if (!learned && !readComplete && !(session && session.quick_peek === 1)) {
-      return res.status(403).json({ error: '要先完成跟读才能看释义哦' });
+    if (!learned && !sessionUnlocksMeaning(session, word, m)) {
+      return res.status(403).json({ error: '要先完成输入和跟读才能看释义哦' });
     }
 
     const lines = translationLines(dictDb, word, bundle.settings.meaningLines);
     logEvent(profileId, { sessionId: session?.session_id, word, type: 'meaning_shown', step: 'meaning' });
-    upsertSession(userDb, profileId, session?.session_id, { word, meaning_shown: 1 });
+    markMeaningShown(userDb, profileId, session);
     res.json({
       word,
       lines,
@@ -164,8 +165,8 @@ export function createVocabRouter(userDb, getDictDb) {
     }
     const session = getSession(userDb, req.profile.id, req.get('X-Session-Id'));
     const m = LEVEL_COUNTS[bundle.effectiveLevel].reading;
-    const readOk = session && (session.read_pass >= m || session.assisted === 1);
-    if (!readOk) {
+    // 与释义接口同一套判定：必须同一个会话、绑定同一个词、输入与跟读都达标
+    if (!sessionUnlocksMeaning(session, word, m)) {
       return res.status(403).json({ error: '要先完成输入和跟读' });
     }
     const updated = graduateWord(userDb, req.profile.id, word, {

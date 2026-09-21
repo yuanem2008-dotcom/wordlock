@@ -3,7 +3,7 @@
 import { Router } from 'express';
 import { findSuggestions } from '../suggest.js';
 import { searchZh } from '../zh-search.js';
-import { getSession } from '../sessions.js';
+import { getSession, sessionUnlocksPronunciation } from '../sessions.js';
 import { getLearnedWord } from '../vocab.js';
 import { getProfileBundle } from '../settings.js';
 import { lookupLimitState } from '../limits.js';
@@ -61,11 +61,11 @@ export function createDictRouter({ getDictDb, userDb }) {
     if (!row) {
       return res.status(404).json({ error: '词典里没有这个词' });
     }
-    // 服务器校验（需求 阶段3）：会话已完成输入，或该词已学会
+    // 服务器校验（需求 阶段3）：会话**绑定的是这个词**且输入已完成，或该词已学会
     const learned = getLearnedWord(userDb, req.profile.id, word);
     if (!learned) {
       const session = getSession(userDb, req.profile.id, req.get('X-Session-Id'));
-      if (!session || session.typing_done !== 1) {
+      if (!sessionUnlocksPronunciation(session, word)) {
         return res.status(403).json({ error: '要先完成输入才能听读音哦' });
       }
     }

@@ -39,7 +39,7 @@ cd ~/Desktop/word-lock && npm start
 
 浏览器打开 **http://localhost:3000**。想换端口：`PORT=3001 npm start`。
 
-5. 跑测试：`npm test`（共 73 个测试：单元测试 + 接口集成测试）。
+5. 跑测试：`npm test`（共 119 个测试：单元测试 + 接口集成测试，含一组"门槛不可绕过"的安全回归）。
 
 ## 二、功能总览（按使用场景）
 
@@ -154,7 +154,8 @@ cd ~/Desktop/word-lock && npm run try-scorer
 | 想看到底发生了什么 | 把 `.env` 里 `XUNFEI_DEBUG` 改成 `1` 再重启，服务器日志会打印与讯飞的完整往来和评分 XML |
 
 > 想临时回到模拟打分：把 `.env` 里的 `SCORER` 改成 `mock` 并重启。
-> 还有个小技巧：浏览器打开 `http://localhost:3000/?dev=1` 会出现"模拟评分"滑块，不用麦克风也能测完整流程（给孩子用时不要加 `?dev=1`）。
+> 开发时想不用麦克风测流程：在 `.env` 里加 `WORDLOCK_DEV=1` 并在浏览器地址后加 `?dev=1`（会出现"模拟评分"滑块）。
+> **注意**：`WORDLOCK_DEV` 只是让自己调试用的开关；不设它、又用着 `SCORER=mock`，服务器会直接拒绝启动。
 
 ## 四、iPad 上使用（要用麦克风就必须做这步）
 
@@ -172,7 +173,7 @@ cd ~/Desktop/word-lock && brew install mkcert
 cd ~/Desktop/word-lock && npm run certs
 ```
 
-`npm run certs` 会自动找出电脑在局域网里的地址（你这台是 `192.168.1.123`）写进证书，并告诉你证书放在哪。
+`npm run certs` 会自动找出电脑在局域网里的地址（形如 `192.168.x.x`）写进证书，并告诉你证书放在哪。
 
 > 这一步也可能要你输一次 Mac 密码（把本地根证书装进系统信任列表，这样**电脑自己的浏览器**也不会报“不安全”）。
 > 不想输密码就运行 `npm run certs -- --no-install`：证书照样能用，iPad 不受影响，只是电脑浏览器打开 https 会提示一次“不安全”。
@@ -190,7 +191,7 @@ cd ~/Desktop/word-lock && npm run start:https
 ```
 WordLock 已启动（HTTPS）
   这台电脑上打开：https://localhost:3000
-  iPad 上用这个地址：https://192.168.1.123:3000   ← 就是这一行
+  iPad 上用这个地址：https://192.168.x.x:3000   ← 就是这一行
 ```
 
 记下 iPad 那个地址。
@@ -213,12 +214,12 @@ mkcert -CAROOT
 
 ### 第 4 步：在 iPad 上打开
 
-1. iPad 用 **Safari** 打开第 2 步记下的地址，例如 `https://192.168.1.123:3000`
+1. iPad 用 **Safari** 打开第 2 步记下的地址，例如 `https://192.168.x.x:3000`
 2. 第一次点麦克风会问权限 → 选「允许」（也许要先去 **设置 → Safari → 麦克风** 打开）
 3. 点 Safari 的**分享按钮 → 添加到主屏幕**，就能像 App 一样全屏使用
 
 > 已经帮你生成好的证书文件在这里（隔空投送的时候用这个）：
-> `/Users/ericyuan/Library/Application Support/mkcert/rootCA.pem`
+> 位置是 `$(mkcert -CAROOT)/rootCA.pem`（在终端里运行 `mkcert -CAROOT` 就能看到目录）。
 
 ### 遇到问题怎么办
 

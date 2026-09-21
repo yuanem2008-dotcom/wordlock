@@ -9,17 +9,61 @@ import { todayLocal, effectiveIntervals, getVocabWord } from '../vocab.js';
 
 const router = Router();
 
-/* ---------- 访问令牌：服务重启后失效，需重新输 PIN ---------- */
+/* ---------- 访问令牌：服务重启后失效；页面空闲 30 分钟也要重新输密码 ---------- */
 
-const bootSecret = crypto.randomBytes(32);
-const parentToken = () => crypto.createHmac('sha256', bootSecret).update('parent-v1').digest('hex');
+const SESSION_IDLE_MS = 30 * 60 * 1000;
+const parentSessions = new Map(); // token → 最近一次使用时间
+
+function issueToken() {
+  const token = crypto.randomBytes(24).toString('hex');
+  parentSessions.set(token, Date.now());
+  return token;
+}
 
 function requireParent(req, res, next) {
   const token = String(req.get('X-Parent-Token') ?? '');
-  if (token !== parentToken()) {
+  const lastUsed = parentSessions.get(token);
+  if (!lastUsed) {
     return res.status(401).json({ error: '请先输入家长密码' });
   }
+  if (Date.now() - lastUsed > SESSION_IDLE_MS) {
+    parentSessions.delete(token);
+    return res.status(401).json({ error: '太久没操作，请重新输入家长密码' });
+  }
+  parentSessions.set(token, Date.now());
   next();
+}
+
+/* ---------- PIN 防暴力破解：失败次数入库，锁定时间逐步翻倍 ---------- */
+
+const PIN_MAX_FAILS = 5;
+const PIN_BASE_LOCK_MS = 30 * 1000;
+
+function lockRemainingMs() {
+  const until = Number(getMeta('pin_locked_until') ?? 0);
+  return Math.max(0, until - Date.now());
+}
+
+function notePinFailure() {
+  const fails = Number(getMeta('pin_fails') ?? 0) + 1;
+  setMeta('pin_fails', String(fails));
+  if (fails >= PIN_MAX_FAILS) {
+    const rounds = Math.floor(fails / PIN_MAX_FAILS) - 1;
+    const lockMs = PIN_BASE_LOCK_MS * 2 ** Math.max(0, rounds);
+    setMeta('pin_locked_until', String(Date.now() + lockMs));
+  }
+  return fails;
+}
+
+function clearPinFailures() {
+  setMeta('pin_fails', '0');
+  setMeta('pin_locked_until', '0');
+}
+
+// 首次设置密码只允许在电脑本机操作，防止孩子抢先设一个只有他知道的密码
+function isLocalRequest(req) {
+  const ip = req.ip || req.socket?.remoteAddress || '';
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
 function getMeta(key) {
@@ -48,13 +92,23 @@ router.post('/parent/pin', (req, res) => {
   if (getMeta('parent_pin_hash')) {
     return res.status(403).json({ error: '密码已经设置过了，请直接输入' });
   }
+  if (!isLocalRequest(req)) {
+    return res.status(403).json({
+      error: '第一次设置家长密码请在运行服务的这台电脑上操作（浏览器打开 http://localhost:3000）',
+    });
+  }
   const salt = crypto.randomBytes(16).toString('hex');
   setMeta('parent_pin_salt', salt);
   setMeta('parent_pin_hash', hashPin(pin, salt));
-  res.json({ ok: true, token: parentToken() });
+  clearPinFailures();
+  res.json({ ok: true, token: issueToken() });
 });
 
 router.post('/parent/login', (req, res) => {
+  const locked = lockRemainingMs();
+  if (locked > 0) {
+    return res.status(429).json({ error: `试的次数太多啦，请等 ${Math.ceil(locked / 1000)} 秒再试` });
+  }
   const pin = String(req.body?.pin ?? '');
   const salt = getMeta('parent_pin_salt');
   const hash = getMeta('parent_pin_hash');
@@ -62,9 +116,16 @@ router.post('/parent/login', (req, res) => {
   const a = Buffer.from(hash, 'hex');
   const b = Buffer.from(hashPin(pin, salt), 'hex');
   if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
-    return res.status(403).json({ error: '密码不对，再试试' });
+    const fails = notePinFailure();
+    const waitMs = lockRemainingMs();
+    return res.status(waitMs > 0 ? 429 : 403).json({
+      error: waitMs > 0
+        ? `试的次数太多啦，请等 ${Math.ceil(waitMs / 1000)} 秒再试`
+        : `密码不对，再试试（还可以试 ${Math.max(0, PIN_MAX_FAILS - fails)} 次）`,
+    });
   }
-  res.json({ ok: true, token: parentToken() });
+  clearPinFailures();
+  res.json({ ok: true, token: issueToken() });
 });
 
 /* ---------- 以下都需要家长令牌（只挂 /parent 路径，避免拦截其他 /api 路由） ---------- */

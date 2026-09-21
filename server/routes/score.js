@@ -1,108 +1,163 @@
 // 发音评测接口（需求 5.1 / 阶段 2）+ 首次校准。
+//
+// 安全不变量：
+//   - 评分前必须确认：同一个档案、同一个会话、同一个词、**输入阶段已完成**。
+//     否则客户端可以直接调 /api/score 跳过「输入 N 次」这道门槛。
+//   - mockScore（模拟打分滑块）只在显式开发模式下生效，绝不作为安全边界。
+//   - 校准分数线由**服务端**根据自己记录的分数算，不接受客户端上报的分数。
 
 import { Router } from 'express';
 import { getScorer, scorerIsConfigured } from '../scorers/index.js';
 import { decideOutcome } from '../scoring-policy.js';
-import { getProfileBundle } from '../settings.js';
-import { LEVEL_COUNTS } from '../settings.js';
-import { upsertSession, getSession } from '../sessions.js';
+import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
+import { getSession, recordReadingPass, recordReadingFail, getSession as readSession } from '../sessions.js';
 import { graduateWord } from '../vocab.js';
 
 const MAX_AUDIO_BYTES = 4 * 1024 * 1024;
+const CALIBRATION_MIN_SAMPLES = 2;
+const CALIBRATION_CLAMP = [50, 75];
+
+const normalize = (s) => String(s ?? '').trim().toLowerCase();
 
 export function createScoreRouter(userDb) {
   const router = Router();
   const insertEvent = userDb.prepare(
     `INSERT INTO events (profile_id, ts, session_id, mode, word, step, type, detail)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+     VALUES (?, ?, ?, ?, ?, 'reading', ?, ?)`
   );
+  const logEvent = (profileId, sid, word, type, detail) =>
+    insertEvent.run(profileId, new Date().toISOString(), sid ?? null, 'en', word ?? null, type, detail ? JSON.stringify(detail) : null);
+
+  // 模拟打分只允许在显式开发模式下使用
+  const devMode = () => (process.env.WORDLOCK_DEV ?? '') === '1';
 
   router.post('/score', async (req, res) => {
     const profileId = req.profile.id;
     const bundle = getProfileBundle(userDb, req.profile);
     const passScore = Number(bundle.settings.passScore) || 60;
+    const requiredReading = LEVEL_COUNTS[bundle.effectiveLevel].reading;
 
-    const word = String(req.body?.word ?? '').slice(0, 64);
+    const word = normalize(req.body?.word);
     const sessionId = String(req.body?.sessionId ?? '').slice(0, 64) || null;
-    const audioBase64 = typeof req.body?.audioBase64 === 'string' ? req.body.audioBase64 : '';
-    const mockScore = Number(req.body?.mockScore);
-    const isMock = Number.isFinite(mockScore);
-    const isCalibration = Boolean(req.body?.calibration); // 校准不进生词本、不记读数
+    const isCalibration = Boolean(req.body?.calibration);
 
-    // 没录到有效声音：友好提示，不计入失败次数（需求 2.3）
+    /* ---- 门槛：会话必须存在、绑定同一个词、输入已完成 ---- */
+    const session = isCalibration ? null : getSession(userDb, profileId, sessionId);
+    if (!isCalibration) {
+      if (!session || session.word !== word) {
+        return res.status(403).json({ error: '这个会话不对应这个词，请重新开始' });
+      }
+      if (session.typing_done !== 1) {
+        return res.status(403).json({ error: '要先完成输入才能跟读哦' });
+      }
+    }
+
+    /* ---- 音频基本校验（不再因缺音频抛异常）---- */
+    const audioBase64 = typeof req.body?.audioBase64 === 'string' ? req.body.audioBase64 : '';
     const buffer = audioBase64 ? Buffer.from(audioBase64, 'base64') : null;
-    if (!isMock && (!buffer || buffer.length < 900)) {
-      return res.json({ score: null, passed: false, error: 'too_quiet', message: '没听清，靠近一点再念一遍' });
+    const mockScore = Number(req.body?.mockScore);
+    const useMock = Number.isFinite(mockScore) && devMode();
+
+    if (!useMock && (!buffer || buffer.length < 900)) {
+      return res.json({ score: null, passed: false, error: 'too_quiet', message: '没听清，靠近一点再念一遍', retry: true });
     }
     if (buffer && buffer.length > MAX_AUDIO_BYTES) {
-      return res.json({ score: null, passed: false, error: 'too_long', message: '录音有点长了，再试一次' });
+      return res.json({ score: null, passed: false, error: 'too_long', message: '录音有点长了，再试一次', retry: true });
     }
 
     const scorer = await getScorer();
     if (!scorerIsConfigured(scorer.name)) {
       return res.json({ score: null, passed: false, error: 'not_configured', message: '评测服务还没配置好' });
     }
-    const result = await scorer.score(buffer, word, { mockScore: req.body?.mockScore });
+
+    let result;
+    try {
+      result = await scorer.score(buffer, word, useMock ? { mockScore } : {});
+    } catch (err) {
+      console.warn(`[评测] ${scorer.name} 抛异常：${err.message}`);
+      result = { score: null, detail: null, error: 'scorer_error' };
+    }
+
+    /* ---- 校准：只由服务端记录分数 ---- */
+    if (isCalibration) {
+      if (result.error || result.score == null) {
+        const message = result.error === 'no_speech' ? '没听清，靠近一点再念一遍' : '评测没成功，再试一次';
+        return res.json({ score: null, passed: false, error: result.error || 'scorer_error', message, retry: true });
+      }
+      userDb
+        .prepare('INSERT INTO calibration_samples (profile_id, ts, score, clean) VALUES (?, ?, ?, ?)')
+        .run(profileId, new Date().toISOString(), result.score, result.detail?.noisy || result.detail?.nonsense ? 0 : 1);
+      return res.json({ score: result.score, passed: true, calibration: true, detail: null });
+    }
+
+    /* ---- 正常跟读 ---- */
     const outcome = decideOutcome(result, passScore);
     if (outcome.kind === 'retry') {
-      // 环境/设备问题：不计入失败次数（需求 2.3），提示温和（需求 2.9）
       return res.json({
         score: null,
         passed: false,
         error: result.error || 'bad_audio',
         message: outcome.message,
         retry: true,
+        canHelp: session.read_fail >= bundle.settings.helpAfterFails,
       });
     }
     if (outcome.kind === 'error') {
-      // 服务故障：技术细节只写进服务器日志，给孩子只说"再试一次"
       console.warn(`[评测] ${scorer.name} 失败：${result.error}`);
       return res.json({ score: null, passed: false, error: result.error || 'scorer_error', message: outcome.message });
     }
 
-    const passed = outcome.passed;
+    // 只有真正跑完一次评测（通过或没通过）才计入状态
+    if (outcome.passed) recordReadingPass(userDb, profileId, session, outcome.score);
+    else recordReadingFail(userDb, profileId, session);
+    logEvent(profileId, sessionId, word, outcome.passed ? 'read_pass' : 'read_fail', { score: outcome.score });
 
-    if (sessionId && !isCalibration) {
-      const col = passed ? 'read_pass' : 'read_fail';
-      upsertSession(userDb, profileId, sessionId, { word, mode: 'en' });
-      userDb
-        .prepare(
-          `UPDATE learn_sessions SET ${col} = ${col} + 1, read_attempts = read_attempts + 1, updated_at = ?
-           WHERE profile_id = ? AND session_id = ?`
-        )
-        .run(new Date().toISOString(), profileId, sessionId);
-      insertEvent.run(
-        profileId,
-        new Date().toISOString(),
-        sessionId,
-        'en',
-        word,
-        'reading',
-        passed ? 'read_pass' : 'read_fail',
-        JSON.stringify({ score: result.score })
-      );
-
-      // 读满 M 次（或求助通关）→ 通关写入生词本（阶段 3）
-      const session = getSession(userDb, profileId, sessionId);
-      if (session && !session.meaning_shown) {
-        const m = LEVEL_COUNTS[bundle.effectiveLevel].reading;
-        if (session.assisted || session.read_pass >= m) {
-          graduateWord(userDb, profileId, word, {
-            settings: bundle.settings,
-            assisted: Boolean(session.assisted),
-            readAttempts: session.read_attempts,
-            bestScore: result.score,
-          });
-        }
-      }
+    let current = readSession(userDb, profileId, sessionId);
+    // 读够 M 次 → 通关写入生词本
+    if (current.read_pass >= requiredReading) {
+      graduateWord(userDb, profileId, word, {
+        settings: bundle.settings,
+        assisted: Boolean(current.assisted),
+        readAttempts: current.read_attempts,
+        bestScore: current.best_score,
+      });
     }
+    current = readSession(userDb, profileId, sessionId);
 
-    res.json({ score: result.score, passed, detail: result.detail ?? null });
+    res.json({
+      score: outcome.score,
+      passed: outcome.passed,
+      detail: result.detail ?? null,
+      passes: current.read_pass,
+      requiredCount: requiredReading,
+      canHelp: !current.assisted && current.read_fail >= bundle.settings.helpAfterFails,
+    });
   });
 
-  // 首次校准（需求 阶段2）：passScore = clamp(round(平均分 − 15), 50, 75)
-  router.post('/calibration', (req, res) => {
+  /* ---------- 首次校准（需求 阶段2）---------- */
+
+  // 开始校准：清掉旧样本（分数完全由服务端记录，客户端无法伪造）
+  router.post('/calibration/start', (req, res) => {
+    userDb.prepare('DELETE FROM calibration_samples WHERE profile_id = ?').run(req.profile.id);
+    res.json({ ok: true });
+  });
+
+  // 结束校准：服务端算平均分 → passScore = clamp(round(avg − 15), 50, 75)
+  // 有效样本不足 2 个（例如孩子敷衍、被拒识）→ 保留原分数线，避免被故意压低。
+  router.post('/calibration/finish', (req, res) => {
     const profileId = req.profile.id;
+    const skipped = Boolean(req.body?.skipped);
+    const samples = userDb
+      .prepare('SELECT score, clean FROM calibration_samples WHERE profile_id = ?')
+      .all(profileId);
+    const usable = samples.filter((s) => s.clean === 1 && Number.isFinite(s.score) && s.score > 0);
+
+    let passScore = null;
+    if (!skipped && usable.length >= CALIBRATION_MIN_SAMPLES) {
+      const avg = usable.reduce((a, b) => a + b.score, 0) / usable.length;
+      passScore = Math.min(CALIBRATION_CLAMP[1], Math.max(CALIBRATION_CLAMP[0], Math.round(avg - 15)));
+    }
+
     const row = req.profile;
     let overrides = {};
     try {
@@ -110,22 +165,12 @@ export function createScoreRouter(userDb) {
     } catch {
       overrides = {};
     }
-    if (req.body?.skipped) {
-      overrides.calibrated = true;
-    } else {
-      const scores = Array.isArray(req.body?.scores) ? req.body.scores : [];
-      const nums = scores.map(Number).filter((n) => Number.isFinite(n));
-      if (!nums.length) {
-        return res.status(400).json({ error: '没有拿到校准分数' });
-      }
-      const avg = nums.reduce((a, b) => a + b, 0) / nums.length;
-      overrides.passScore = Math.min(75, Math.max(50, Math.round(avg - 15)));
-      overrides.calibrated = true;
-    }
-    userDb
-      .prepare('UPDATE profiles SET settings_json = ? WHERE id = ?')
-      .run(JSON.stringify(overrides), profileId);
-    res.json({ ok: true, passScore: overrides.passScore ?? null });
+    if (passScore != null) overrides.passScore = passScore;
+    overrides.calibrated = true;
+    userDb.prepare('UPDATE profiles SET settings_json = ? WHERE id = ?').run(JSON.stringify(overrides), profileId);
+    userDb.prepare('DELETE FROM calibration_samples WHERE profile_id = ?').run(profileId);
+
+    res.json({ ok: true, passScore, usedSamples: usable.length, totalSamples: samples.length });
   });
 
   return router;

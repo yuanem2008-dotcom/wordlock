@@ -23,6 +23,9 @@ export function makeCaller(app) {
       socket.destroy = () => {};
       socket.address = () => ({ port: 0 });
       socket.setTimeout = () => {};
+      // 让 req.ip / remoteAddress 看起来像本机（家长 PIN 首次设置只允许本机操作）。
+      // remoteAddress 是只读 getter，必须用 defineProperty 覆盖。
+      Object.defineProperty(socket, 'remoteAddress', { value: '127.0.0.1', configurable: true });
 
       const req = new http.IncomingMessage(socket);
       req.httpVersion = '1.1';
@@ -46,7 +49,14 @@ export function makeCaller(app) {
 
       const res = new http.ServerResponse(req);
       res.assignSocket(socket);
-      res.on('finish', () => {
+      // 未匹配到路由时 Express 可能直接销毁连接，不一定触发 finish —— 两个都接上
+      res.on('finish', done);
+      res.on('close', done);
+      let settled = false;
+
+      function done() {
+        if (settled) return;
+        settled = true;
         const raw = Buffer.concat(parts).toString('latin1');
         const sep = raw.indexOf('\r\n\r\n');
         const head = raw.slice(0, sep).split('\r\n');
@@ -64,7 +74,7 @@ export function makeCaller(app) {
           data = rawBody;
         }
         resolve({ status, headers: headerMap, data });
-      });
+      }
       res.on('error', reject);
 
       app.handle(req, res, (err) => {

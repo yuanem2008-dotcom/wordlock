@@ -6,3 +6,4 @@ certs/
 npm-debug.log*
 .claude/
 .github-token
+.tmp/

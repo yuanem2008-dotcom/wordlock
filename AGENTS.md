@@ -29,7 +29,8 @@
 | `server/app.js` | 路由装配（集成测试也从这里起 app）、启动时打印评测实现与配置状态 |
 | `server/db.js` | 两个库：`data/dict.db`（词典，只读）、`data/user.db`（档案/事件/生词本/会话） |
 | `server/settings.js` | 档案参数合并 + `effectiveLevel` 门槛档位（纯函数，有测试） |
-| `server/sessions.js` | 单次查词流程的进度 —— **读音/释义接口的 403 门禁依据** |
+| `server/sessions.js` | 单次查词流程的进度 + **唯一允许改门禁状态的函数**（创建会话、记输入/跟读、求助、快速查看） |
+| `server/routes/session.js` | **服务端验证输入阶段**：`POST /api/session` 绑定目标词、`POST /api/typing` 自己比对并数够 N 次 |
 | `server/vocab.js` | 生词本、复习调度、本地日期 |
 | `server/scoring-policy.js` | 评测结果 → 通过/失败/**不计入失败**的处置策略（纯函数，有测试） |
 | `server/scorers/` | 评测器：`mock`（开发）/ `xunfei`（已接通）/ `tencent`（占位） |
@@ -38,7 +39,7 @@
 | `public/app.js` | 界面与流程编排（单文件，较长） |
 | `public/tts.js`、`audio-record.js` | 标准读音（男性嗓音优先级）、录音并转 16k/16bit/单声道 WAV |
 | `scripts/build-dict.js` | ECDICT → `dict.db`（含中文反查索引 `zh_index`） |
-| `tests/` | `node:test` 共 102 个；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
+| `tests/` | `node:test` 共 119 个（含 13 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
 
 ## 不能改坏的硬约束（都是联调/踩坑换来的，改动请连带跑测试）
 
@@ -49,14 +50,31 @@
 - **前端禁止 `window.confirm/alert/prompt`**：内嵌浏览器与 iPad 会屏蔽系统弹窗（confirm 直接返回 false，操作静默失败）。用应用内的 `askConfirm()` / `toast()`。
 - **`public/tts.js` 不能取 `voices[0]`**：macOS 上那是机器人音 Albert，要按候选列表挑饱满男声。
 - 所有用户数据表都带 `profile_id`，请求带 `X-Profile-Id` 头。
-- **读音与释义接口有服务器端校验**（未完成输入/跟读 → 403），不要为了"方便"去掉门禁。
+
+### 门槛不可绕过（这七条是核心不变量，改动务必跑安全回归测试）
+
+1. **「输入 N 次」由服务端判定**：`POST /api/session` 绑定目标词（服务端自己查词典确认存在），
+   `POST /api/typing` 由服务端比对字符串并累加。客户端上报的进度一概不算数。
+2. **会话绑定目标词且创建后不可改**：同一 `sessionId` 换词必须 403（否则「给容易的词过关 → 改词 → 看释义」）。
+3. **释义必须同时满足**：同档案 + 同会话 + `session.word === 请求的词`（归一化后）+ 输入已完成 +
+   （跟读达标 或 求助通关 或 快速查看 或 该词已学会）。见 `sessions.js` 的 `sessionUnlocksMeaning()`。
+4. **读音同理**：`sessionUnlocksPronunciation()`。
+5. **`/api/events` 只记录、绝不授权**：它接收前端上报，所以不能改变任何放行状态；
+   只接受不涉及放行的类型（`lookup_start` / `not_found` / `cancel` / `network_error`）。
+6. **求助通关由服务端判定**：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`，否则 403。
+7. **校准分数线只由服务端算**：`/api/calibration/start` 清样本、`/api/score` 带 `calibration:true` 时
+   由服务端把分数写进 `calibration_samples`、`/api/calibration/finish` 由服务端算平均分
+   （有效样本 < 2 个则保留原分数线）。客户端提交的任何分数一律忽略。
+
+另外：**启动即强检查**——`SCORER=mock` 且没有显式 `WORDLOCK_DEV=1` 时拒绝启动；
+选了 `xunfei`/`tencent` 但密钥缺失也拒绝启动（避免静默变成"随便念都能过"）。
 
 ## 常用命令
 
 ```bash
 npm start              # HTTP（电脑上用；本会话沙箱内不能监听端口）
 npm run start:https    # HTTPS（iPad 用麦克风时需要，先 npm run certs）
-npm test               # 102 个测试（单元 + 进程内集成）
+npm test               # 119 个测试（单元 + 进程内集成 + 安全回归）
 npm run build-dict     # 由 data/raw 的 ECDICT 重建 data/dict.db（约 35 秒）
 npm run try-scorer     # 用 macOS say 合成人声送真实评测，验证密钥与计分是否正常
 npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（单文件源码快照，供外部 AI 审阅）
@@ -68,8 +86,11 @@ npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时�
 
 ## 欢迎重点审阅的地方
 
-1. `server/routes/parent.js`：家长 PIN 与令牌机制是否够稳（当前是进程内 HMAC，服务重启即失效）。
-2. `server/routes/score.js` + `server/scoring-policy.js`：**计分与"不计入失败"的规则有没有漏洞——孩子能不能绕过门槛？**（这是本项目的核心不变量）
+1. `server/routes/parent.js`：家长 PIN 与令牌机制是否够稳（当前是进程内会话 + 30 分钟空闲过期，
+   失败 5 次后按 30 秒起逐次翻倍锁定，首次设置只允许本机）。
+2. `server/routes/score.js` + `server/scoring-policy.js` + `server/routes/session.js`：
+   **门槛与计分还有没有漏洞——孩子能不能绕过？**（这是本项目的核心不变量，
+   `tests/integration.test.js` 末尾那 13 个"安全 N"用例就是它的看门狗）
 3. `public/state-machine.js`：换词重置、中文入口、待巩固流程的边界情况。
 4. `server/vocab.js`：复习调度（间隔 [1,2,7]、求助通关额外一轮、毕业后不再推送）、日期边界。
 5. `server/routes/parent.js` 的"每周汇总 / 放弃点判定"（需求 2.10：未到 `meaning_shown` 且 10 分钟无新事件即视为放弃）。

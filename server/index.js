@@ -7,10 +7,17 @@ import path from 'node:path';
 import https from 'node:https';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.js';
-import { boot } from './app.js';
+import { boot, scorerConfigProblem } from './app.js';
 
 loadEnv();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// 评测没配好就别启动（避免静默变成"随便念都能过"）
+const problem = scorerConfigProblem();
+if (problem) {
+  console.error(`\n启动失败：${problem}\n`);
+  process.exit(1);
+}
 const { app } = boot();
 
 const PORT = Number(process.env.PORT) || 3000;

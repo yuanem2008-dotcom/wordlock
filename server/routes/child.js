@@ -2,9 +2,9 @@
 
 import { Router } from 'express';
 import { getProfileBundle, countActiveDays } from '../settings.js';
-import { getLearnedWord, getVocabWord, todayLocal } from '../vocab.js';
+import { getLearnedWord, getVocabWord, graduateWord, todayLocal } from '../vocab.js';
 import { lookupLimitState } from '../limits.js';
-import { getSession, upsertSession } from '../sessions.js';
+import { getSession, markMeaningShown, useHelp, useQuickPeek } from '../sessions.js';
 
 export function createChildRouter(userDb, getDictDb) {
   const router = Router();
@@ -52,6 +52,12 @@ export function createChildRouter(userDb, getDictDb) {
       return res.status(400).json({ error: '词不对' });
     }
 
+    // 必须绑定到「本会话正在查的那个词」：否则可以拿 apple 的会话去快速查看任意词
+    const session = getSession(userDb, profileId, sessionId);
+    if (!session || session.word !== word) {
+      return res.status(403).json({ error: '这个会话不对应这个词，请重新开始' });
+    }
+
     // pending 的词不覆盖已学会的（需求 2.8 / 阶段5）
     const existing = getVocabWord(userDb, profileId, word);
     if (!existing || existing.status !== 'learned') {
@@ -67,10 +73,46 @@ export function createChildRouter(userDb, getDictDb) {
     const ts = new Date().toISOString();
     insertEvent.run(profileId, ts, sessionId, mode, word, 'typing', 'quick_peek', null);
     insertEvent.run(profileId, ts, sessionId, mode, word, 'meaning', 'meaning_shown', JSON.stringify({ quickPeek: true }));
-    upsertSession(userDb, profileId, sessionId, { word, mode, quick_peek: 1, meaning_shown: 1 });
+    // 只有走完上面的额度校验、且会话绑定的是这个词，才由服务端写入放行标记
+    useQuickPeek(userDb, profileId, session);
+    markMeaningShown(userDb, profileId, session);
 
     const remaining = quota - used - 1;
     res.json({ ok: true, lines: translationLines(word, bundle.settings.meaningLines), remaining });
+  });
+
+  // 求助通关（需求 2.3）：由**服务端**确认「累计读不过 helpAfterFails 次」才放行。
+  // 以前客户端发一条 help_used 事件就能通关（实测可绕过），现在必须服务端同意。
+  router.post('/help', (req, res) => {
+    const profileId = req.profile.id;
+    const bundle = getProfileBundle(userDb, req.profile);
+    const word = String(req.body?.word ?? '').trim().toLowerCase().slice(0, 64);
+    const sessionId = String(req.body?.sessionId ?? '').slice(0, 64) || null;
+    const session = getSession(userDb, profileId, sessionId);
+    if (!session || session.word !== word) {
+      return res.status(403).json({ error: '这个会话不对应这个词，请重新开始' });
+    }
+    if (session.typing_done !== 1) {
+      return res.status(403).json({ error: '要先完成输入才能求助哦' });
+    }
+    if (session.assisted === 1) return res.json({ ok: true, assisted: true, alreadyHelped: true });
+
+    const need = Math.max(1, Math.floor(bundle.settings.helpAfterFails ?? 4));
+    if (session.read_fail < need) {
+      return res.status(403).json({
+        error: '再多试几次吧',
+        remaining: need - session.read_fail,
+      });
+    }
+    useHelp(userDb, profileId, session);
+    insertEvent.run(profileId, new Date().toISOString(), sessionId, session.mode, word, 'reading', 'help_used', null);
+    graduateWord(userDb, profileId, word, {
+      settings: bundle.settings,
+      assisted: true,
+      readAttempts: session.read_attempts,
+      bestScore: session.best_score,
+    });
+    res.json({ ok: true, assisted: true });
   });
 
   // 学习天数（需求 阶段6）：本周（近 7 天）与累计；不做断签清零
