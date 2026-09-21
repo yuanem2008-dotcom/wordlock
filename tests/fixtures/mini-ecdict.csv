@@ -1,0 +1,48 @@
+word,phonetic,definition,translation,pos,collins,oxford,tag,bnc,frq,exchange,detail,audio
+apple,"ˈæp.əl",fruit,"n. 苹果
+n. 苹果树",,1,1,cet4 cet6 ky,150,25771,"s:apples/d:appled/p:appled/i:appled/3:apples",,7274
+book,bʊk,volume,"n. 书本；书籍
+vt. 预订；预约",,1,1,cet4 ky,182,10394,"s:books/d:booked/p:booked/i:booking/3:books",,8879
+water,"ˈwɔː.tə",liquid,"n. 水；雨水
+v. 浇水；灌溉",,1,1,cet4 ky,136,12788,"s:waters/d:watered/p:watered/i:watering/3:waters",,7196
+run,rʌn,move fast,"vi. 跑；奔
+vt. 经营；管理
+n. 奔跑",,1,1,cet4 ky,153,31210,"s:runs/d:ran/p:run/i:running/3:runs",,7002
+happy,"ˈhæp.i",glad,"adj. 高兴的；幸福的
+adj. 乐意的",,1,1,cet4 ky,329,8543,"r:happier/r:happiest/3:happies",,6233
+dog,dɒɡ,animal,"n. 狗
+vt. 尾随",,1,1,ky,317,9205,"s:dogs/3:dogs/d:dogged/p:dogged/i:dogging",,6935
+cat,kæt,animal,"n. 猫
+n. 猫科动物",,1,1,ky,766,4406,"s:cats/3:cats",,7451
+school,skuːl,institution,"n. 学校
+n. 学派；学院",,1,1,cet4 ky,312,9646,"s:schools/3:schools",,7088
+teacher,"ˈtiː.tʃə",instructor,"n. 教师；老师",,1,1,ky,787,4310,"s:teachers/3:teachers",,7110
+student,"ˈstjuː.dənt",learner,"n. 学生
+n. 研究者",,1,1,cet4 ky,478,6004,"s:students/3:students",,7075
+computer,kəmˈpjuː.tə,machine,"n. 计算机；电脑",,1,1,cet4 ky,723,4697,"s:computers/3:computers",,7378
+paper,"ˈpeɪ.pə",material,"n. 纸；纸张
+n. 论文；文件",,1,1,cet4 ky,233,8902,"s:papers/3:papers",,7030
+pen,pen,writing tool,"n. 钢笔；笔
+vt. 写",,1,1,ky,1560,1954,"s:pens/3:pens/d:penned/p:penned/i:penning",,7486
+pencil,"pen.səl",writing tool,"n. 铅笔
+vt. 用铅笔写",,1,1,ky,2340,1489,"s:pencils/3:pencils",,7500
+rain,reɪn,precipitation,"n. 雨；下雨
+vi. 下雨",,1,1,ky,619,5206,"s:rains/d:rained/p:rained/i:raining/3:rains",,7156
+sun,sʌn,star,"n. 太阳
+vt. 晒太阳",,1,1,ky,1026,3120,"s:suns/3:suns",,7134
+moon,muːn,satellite,"n. 月亮；月球
+vi. 闲荡",,1,1,ky,2363,1480,"s:moons/3:moons",,7253
+star,stɑː,celestial body,"n. 星星；恒星
+n. 明星",,1,1,ky,1355,2579,"s:stars/3:stars",,7364
+friend,frend,companion,"n. 朋友；友人",,1,1,cet4 ky,278,9965,"s:friends/3:friends",,6913
+family,"ˈfæm.əl.i",relatives,"n. 家庭；家人
+n. 家族",,1,1,cet4 ky,294,8980,"s:families/3:families",,6899
+mother,"ˈmʌð.ə",parent,"n. 母亲；妈妈",,1,1,ky,387,7979,"s:mothers/3:mothers",,6989
+father,"ˈfɑː.ðə",parent,"n. 父亲；爸爸",,1,1,ky,421,7740,"s:fathers/3:fathers",,6990
+brother,"ˈbrʌð.ə",sibling,"n. 兄弟；兄；弟",,1,1,ky,509,6517,"s:brothers/3:brothers",,6955
+sister,"ˈsɪs.tə",sibling,"n. 姐妹；姐；妹",,1,1,ky,781,4348,"s:sisters/3:sisters",,7011
+well-known,ˌwel ˈnəʊn,famous,"adj. 著名的；众所周知的",,,1,,3001,1159,,,,7610
+don't,dəʊnt,do not,"不要；别（do not 的缩写）",,,1,,3110,1105,,,,7620
+can't,kɑːnt,cannot,"不能；不会（cannot 的缩写）",,,1,,3200,1050,,,,7621
+serendipity,ˌser.ənˈdɪp.ə.ti,good luck,"n. 意外发现珍宝的运气；机缘巧合",,,,,0,,,,,7777
+quixotic,kwɪkˈsɒt.ɪ.k,idealistic,"adj. 堂吉诃德式的；狂想家的",,,,,0,,,,,7778

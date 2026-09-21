@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>WordLock 查词器</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔒</text></svg>">
+  <link rel="manifest" href="manifest.json">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="app">
+
+    <!-- 档案选择 -->
+    <section id="view-profiles" class="view" hidden>
+      <h1 class="page-title">你是谁呀？</h1>
+      <div id="profile-list" class="profile-grid"></div>
+      <button id="btn-new-profile" class="btn btn-big btn-ghost">新建档案</button>
+    </section>
+
+    <!-- 创建档案 -->
+    <section id="view-create" class="view" hidden>
+      <h1 class="page-title">新建档案</h1>
+      <label class="field-label" for="input-name">名字</label>
+      <input id="input-name" class="text-input" type="text" maxlength="20"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             placeholder="写上你的名字">
+      <p class="field-label">选一个头像</p>
+      <div id="avatar-grid" class="profile-grid avatar-grid"></div>
+      <p class="field-label">选择学习方式</p>
+      <div id="preset-grid" class="preset-grid"></div>
+      <div class="row-buttons">
+        <button id="btn-create-back" class="btn btn-ghost">返回</button>
+        <button id="btn-create-done" class="btn btn-big btn-primary">创建</button>
+      </div>
+    </section>
+
+    <!-- 输入阶段 -->
+    <section id="view-main" class="view" hidden>
+      <header class="topbar">
+        <span id="whoami" class="whoami"></span>
+        <div class="topbar-actions">
+          <button id="btn-theme" class="btn btn-small btn-ghost" title="选主题">🎨</button>
+          <button id="btn-switch-profile" class="btn btn-small btn-ghost">换人</button>
+        </div>
+      </header>
+
+      <div class="entry-chips">
+        <button id="chip-review" class="chip-link" hidden></button>
+        <button id="chip-pending" class="chip-link" hidden></button>
+        <button id="chip-vocab" class="chip-link">生词本</button>
+        <button id="chip-collection" class="chip-link">收藏册</button>
+        <button id="chip-garden" class="chip-link" hidden>花园</button>
+      </div>
+
+      <p class="main-hint" id="main-hint">输入英文单词，或者输入中文来查英文</p>
+
+      <div id="zh-target-row" hidden>
+        <p class="zh-target-label">请照着它，输入下面这个词</p>
+        <p id="zh-target-word" class="zh-target-word"></p>
+      </div>
+
+      <div id="progress-row">
+        <div id="progress-dots" class="dots"></div>
+        <p id="progress-text" class="progress-text"></p>
+      </div>
+
+      <div id="feedback-line" class="feedback" hidden></div>
+
+      <div id="suggestion-box" hidden>
+        <p class="suggest-title">你是不是想输入：</p>
+        <div id="suggestion-chips" class="chips"></div>
+      </div>
+
+      <input id="input-word" class="text-input input-word" type="text" name="word"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             placeholder="在这里输入" aria-label="输入单词">
+      <button id="btn-submit" class="btn btn-big btn-primary">输入</button>
+      <button id="btn-cancel-word" class="btn btn-ghost">换一个词</button>
+      <button id="btn-quick-peek" class="btn btn-peek" hidden></button>
+    </section>
+
+    <!-- 中文候选列表 -->
+    <section id="view-candidates" class="view" hidden>
+      <p id="zh-query-title" class="page-title-small"></p>
+      <div id="candidate-list" class="candidate-list"></div>
+      <div id="candidate-empty" class="feedback" hidden>没找到，换个更短或更常见的说法试试</div>
+      <button id="btn-candidates-back" class="btn btn-big btn-ghost">返回</button>
+    </section>
+
+    <!-- 展示读音 -->
+    <section id="view-pronunciation" class="view" hidden>
+      <div id="celebration" class="celebration" hidden>
+        <span class="celebration-star">✨</span>
+        <p class="celebration-text">输入得真棒！</p>
+      </div>
+      <p id="pron-word" class="pron-word"></p>
+      <p id="pron-phonetic" class="pron-phonetic" hidden></p>
+      <div class="row-buttons">
+        <button id="btn-replay" class="btn btn-big btn-secondary">再听一遍</button>
+        <button id="btn-go-reading" class="btn btn-big btn-primary">继续读一读</button>
+      </div>
+      <button id="btn-pron-back" class="btn btn-ghost">返回</button>
+    </section>
+
+    <!-- 跟读阶段 -->
+    <section id="view-reading" class="view" hidden>
+      <p id="reading-title" class="page-title-small">读出这个词</p>
+      <p id="reading-word" class="pron-word"></p>
+      <p id="reading-phonetic" class="pron-phonetic" hidden></p>
+
+      <div id="reading-dots" class="dots"></div>
+      <p id="reading-progress-text" class="progress-text"></p>
+      <div id="reading-stars" class="stars"></div>
+
+      <div id="volume-bar" class="volume" hidden><div id="volume-fill" class="volume-fill"></div></div>
+
+      <button id="btn-mic" class="btn btn-big btn-mic">🎤 点一下开始读</button>
+      <div id="feedback-reading" class="feedback" hidden></div>
+      <button id="btn-hear-standard" class="btn btn-secondary" hidden>听标准读音</button>
+      <button id="btn-help" class="btn btn-help" hidden>求助通关</button>
+
+      <div id="dev-panel" class="dev-panel" hidden>
+        <p class="dev-note">开发模式：模拟评分</p>
+        <input id="dev-score" type="range" min="0" max="100" value="80">
+        <button id="btn-dev-score" class="btn btn-small btn-secondary">按这个分数评测</button>
+      </div>
+      <button id="btn-calibration-skip" class="btn btn-ghost" hidden>跳过试一试</button>
+    </section>
+
+    <!-- 释义 -->
+    <section id="view-meaning" class="view" hidden>
+      <div id="meaning-celebration" class="celebration" hidden>
+        <span class="celebration-star">🌟</span>
+        <p class="celebration-text">学会啦！</p>
+      </div>
+      <p id="meaning-word" class="pron-word"></p>
+      <p id="meaning-note" class="meaning-note" hidden></p>
+      <div id="meaning-lines" class="meaning-lines"></div>
+      <button id="btn-meaning-replay" class="btn btn-secondary">听标准读音</button>
+      <button id="btn-meaning-next" class="btn btn-big btn-primary">查下一个词</button>
+    </section>
+
+    <!-- 复习 -->
+    <section id="view-review" class="view" hidden>
+      <p class="page-title-small">复习一下</p>
+      <p id="review-progress" class="progress-text"></p>
+      <p class="review-ask">这个词是什么意思？请输入英文：</p>
+      <p id="review-gloss" class="review-gloss"></p>
+      <div id="review-verdict" class="feedback" hidden></div>
+      <input id="review-input" class="text-input input-word" type="text"
+             autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"
+             placeholder="输入英文单词" aria-label="复习输入">
+      <button id="btn-review-submit" class="btn btn-big btn-primary">回答</button>
+      <button id="btn-review-quit" class="btn btn-ghost">先不复习了</button>
+    </section>
+
+    <!-- 生词本 -->
+    <section id="view-vocab" class="view" hidden>
+      <p class="page-title-small">生词本</p>
+      <div id="vocab-list" class="vocab-list"></div>
+      <div id="vocab-empty" class="feedback" hidden>生词本还是空的，去查几个词吧</div>
+      <button id="btn-vocab-back" class="btn btn-big btn-ghost">返回</button>
+    </section>
+
+    <!-- 收藏册 -->
+    <section id="view-collection" class="view" hidden>
+      <p class="page-title-small">单词卡收藏册</p>
+      <p id="collection-stats" class="progress-text"></p>
+      <div id="collection-grid" class="card-grid"></div>
+      <div id="collection-empty" class="feedback" hidden>学会了词就会有一张卡片哦</div>
+      <button id="btn-collection-back" class="btn btn-big btn-ghost">返回</button>
+    </section>
+
+    <!-- 花园 -->
+    <section id="view-garden" class="view" hidden>
+      <p class="page-title-small">我的花园</p>
+      <p id="garden-count" class="progress-text"></p>
+      <div id="garden-plot" class="garden-plot"></div>
+      <p id="garden-family" class="progress-text" hidden></p>
+      <button id="btn-garden-back" class="btn btn-big btn-ghost">返回</button>
+    </section>
+
+    <!-- 家长模式：PIN -->
+    <section id="view-parent-pin" class="view" hidden>
+      <p id="pin-title" class="page-title-small">输入家长密码</p>
+      <input id="input-pin" class="text-input input-pin" type="password" inputmode="numeric"
+             maxlength="6" autocomplete="off" aria-label="家长密码">
+      <div id="pin-error" class="feedback" hidden></div>
+      <div class="row-buttons">
+        <button id="btn-pin-cancel" class="btn btn-ghost">取消</button>
+        <button id="btn-pin-ok" class="btn btn-big btn-primary">进入</button>
+      </div>
+    </section>
+
+    <!-- 家长面板 -->
+    <section id="view-parent" class="view" hidden>
+      <p class="page-title-small">家长模式</p>
+      <div class="tab-row">
+        <button class="tab-btn selected" data-tab="tab-profiles">档案</button>
+        <button class="tab-btn" data-tab="tab-settings">设置</button>
+        <button class="tab-btn" data-tab="tab-records">记录</button>
+        <button class="tab-btn" data-tab="tab-summary">汇总</button>
+        <button class="tab-btn" data-tab="tab-misc">其他</button>
+      </div>
+
+      <div id="tab-profiles" class="tab-body">
+        <div id="parent-profile-list" class="profile-grid"></div>
+        <div id="parent-profile-form" hidden>
+          <label class="field-label">名字</label>
+          <input id="pp-name" class="text-input" type="text" maxlength="20">
+          <p class="field-label">头像</p>
+          <div id="pp-avatars" class="profile-grid avatar-grid"></div>
+          <p class="field-label">预设</p>
+          <div id="pp-presets" class="preset-grid"></div>
+          <div class="row-buttons">
+            <button id="btn-pp-delete" class="btn btn-danger">删除档案</button>
+            <button id="btn-pp-save" class="btn btn-primary">保存</button>
+          </div>
+        </div>
+        <button id="btn-pp-new" class="btn btn-big btn-ghost">新建档案</button>
+      </div>
+
+      <div id="tab-settings" class="tab-body" hidden>
+        <label class="field-label">给哪个档案设置</label>
+        <select id="ps-profile" class="text-input"></select>
+        <div id="ps-fields" class="ps-fields"></div>
+        <button id="btn-ps-save" class="btn btn-big btn-primary">保存设置</button>
+      </div>
+
+      <div id="tab-records" class="tab-body" hidden>
+        <label class="field-label">档案</label>
+        <select id="pr-profile" class="text-input"></select>
+        <label class="field-label">日期（可不选）</label>
+        <input id="pr-date" class="text-input" type="date">
+        <button id="btn-pr-load" class="btn btn-secondary">查看记录</button>
+        <div id="pr-list" class="record-list"></div>
+      </div>
+
+      <div id="tab-summary" class="tab-body" hidden>
+        <label class="field-label">档案</label>
+        <select id="pm-profile" class="text-input"></select>
+        <button id="btn-pm-load" class="btn btn-secondary">生成本周汇总</button>
+        <div id="pm-body" class="pm-body"></div>
+      </div>
+
+      <div id="tab-misc" class="tab-body" hidden>
+        <p class="field-label">导出（Excel 可打开）</p>
+        <div class="row-buttons">
+          <button id="btn-export-vocab" class="btn btn-secondary">生词本 CSV</button>
+          <button id="btn-export-events" class="btn btn-secondary">查词记录 CSV</button>
+        </div>
+        <label class="field-label">家庭花园（两个档案的词种进同一个花园，只显示总数）</label>
+        <button id="btn-family-garden" class="btn btn-secondary">打开</button>
+        <button id="btn-parent-exit" class="btn btn-big btn-ghost">退出家长模式</button>
+      </div>
+    </section>
+
+    <!-- 今天完成啦 -->
+    <div id="done-overlay" class="overlay" hidden>
+      <div class="overlay-card">
+        <span class="overlay-star">🌈</span>
+        <p class="overlay-title">今天完成啦！</p>
+        <p class="overlay-text">可以休息一会儿了</p>
+      </div>
+    </div>
+
+    <!-- 主题选择 -->
+    <div id="theme-modal" class="overlay" hidden>
+      <div class="overlay-card">
+        <p class="overlay-title">选一个主题</p>
+        <div class="row-buttons">
+          <button id="btn-theme-simple" class="btn btn-big btn-secondary">简洁</button>
+          <button id="btn-theme-garden" class="btn btn-big btn-secondary">花园</button>
+        </div>
+        <button id="btn-theme-close" class="btn btn-ghost">关闭</button>
+      </div>
+    </div>
+
+    <!-- 应用内确认框（不能用系统 confirm：内嵌浏览器和 iPad 会屏蔽系统弹窗） -->
+    <div id="confirm-modal" class="overlay" hidden>
+      <div class="overlay-card">
+        <p id="confirm-title" class="overlay-title"></p>
+        <p id="confirm-text" class="overlay-text"></p>
+        <div class="row-buttons">
+          <button id="btn-confirm-cancel" class="btn btn-big btn-ghost">取消</button>
+          <button id="btn-confirm-ok" class="btn btn-big btn-primary">确定</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" hidden></div>
+
+    <button id="parent-entry" class="parent-entry" title="家长模式">家长</button>
+  </main>
+  <script type="module" src="app.js"></script>
+</body>
+</html>

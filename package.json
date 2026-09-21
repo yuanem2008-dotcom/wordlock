@@ -1,0 +1,26 @@
+{
+  "name": "wordlock",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "儿童英语查词器：设了门槛的字典（阶段1）",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server/index.js",
+    "start:https": "node scripts/start-https.js",
+    "test": "node --test tests/",
+    "build-dict": "node scripts/build-dict.js",
+    "certs": "node scripts/make-certs.js",
+    "try-scorer": "node scripts/try-scorer.js",
+    "review-pack": "node scripts/make-review-pack.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.4.1",
+    "express": "^4.21.2"
+  },
+  "allowScripts": {
+    "better-sqlite3@12.11.1": true
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "name": "WordLock 查词器",
+  "short_name": "WordLock",
+  "start_url": "/",
+  "display": "fullscreen",
+  "background_color": "#faf6ee",
+  "theme_color": "#faf6ee",
+  "icons": [
+    { "src": "icon-180.png", "sizes": "180x180", "type": "image/png" }
+  ]
+}
