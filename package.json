@@ -15,6 +15,7 @@
     "certs": "node scripts/make-certs.js",
     "try-scorer": "node scripts/try-scorer.js",
     "review-pack": "node scripts/make-review-pack.js",
+    "security-pack": "node scripts/make-security-pack.js",
     "push-github": "node scripts/push-to-github.js"
   },
   "dependencies": {
