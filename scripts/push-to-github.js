@@ -148,14 +148,16 @@ const blobs = await inBatches(files, 6, async ({ rel, base64 }) => {
 const tree = await api(`${repoPath}/git/trees`, { method: 'POST', body: JSON.stringify({ tree: blobs }) });
 if (!tree.data.sha) fail(`建目录树失败：${JSON.stringify(tree.data).slice(0, 300)}`);
 
+// 提交说明用本地 HEAD 的标题+正文，这样仓库历史能看出每次改了什么
+const headSubject = execSync('git log -1 --pretty=%s', { cwd: root, encoding: 'utf8' }).trim();
+const headBody = execSync('git log -1 --pretty=%b', { cwd: root, encoding: 'utf8' }).trim();
 const commit = await api(`${repoPath}/git/commits`, {
   method: 'POST',
   body: JSON.stringify({
     message:
-      'WordLock 查词器：阶段 1～6 完整实现\n\n' +
-      '设了门槛的字典：输入 N 次 + 跟读评测通过 M 次才显示释义。\n' +
-      '含中英文查词、讯飞发音评测、生词本与复习、家长模式、快速查看、收藏册与花园主题。\n' +
-      '102 个测试（单元 + 进程内集成）。详见 README.md / AGENTS.md。',
+      `${headSubject}\n\n${headBody}\n\n` +
+      `（本提交由 npm run push-github 生成：包含仓库当前全部 ${files.length} 个文件，` +
+      `对应本地提交 ${execSync('git rev-parse --short HEAD', { cwd: root, encoding: 'utf8' }).trim()}）`,
     tree: tree.data.sha,
     parents: [baseCommit],
   }),
