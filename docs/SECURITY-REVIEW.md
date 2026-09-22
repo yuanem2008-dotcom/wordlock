@@ -23,13 +23,16 @@
 4. **快速查看只免除"跟读"，不免除"输入"**：`/api/quick-peek` 要求 `session.typing_count >= 1`，
    **中英文入口都要求**（否则声明 `mode='zh'` 就能绕过）。它直接返回释义、不走 `/api/meaning`，
    所以这条判断必须写在它自己里面。
-5. `/api/events` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
-6. 求助通关由服务端判定：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`。
-7. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
-8. **同一段录音重复提交不重复计数**（`/api/score` 的音频指纹），返回 `duplicate_audio`。
+5. **词的校验与归一化只有一个来源**：`server/word-rules.js`（客户端 `public/state-machine.js` 有等价实现，改一处要同步另一处）。
+   允许字母与词间的空格/连字符/撇号（词典里有 `nice day` 这类短语）——**应用给出的候选必须能被孩子输入**，
+   否则会出现「候选里显示 nice day、但输入时永远提示只能输入英文字母」这种自相矛盾。
+6. `/api/events` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
+7. 求助通关由服务端判定：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`。
+8. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
+9. **同一段录音重复提交不重复计数**（`/api/score` 的音频指纹），返回 `duplicate_audio`。
    注意两个易错点：判重对**通过和失败都生效**（否则回放失败的录音可刷够 read_fail 白拿求助通关）；
    指纹记满是**先进先出丢最早的**，不是 clear() 全清（否则交够若干段就能重放最早那段）。
-9. 启动强检查：`SCORER=mock` 且没有 `WORDLOCK_DEV=1` → 拒绝启动；密钥缺失 → 拒绝启动
+10. 启动强检查：`SCORER=mock` 且没有 `WORDLOCK_DEV=1` → 拒绝启动；密钥缺失 → 拒绝启动
    （检查在 `boot()` 里，任何入口点都绕不过去）。
 
 > ⚠️ 注意：`server/sessions.js`（状态层，提供状态函数）与 `server/routes/session.js`
@@ -57,8 +60,38 @@
 
 ## 测试
 
-仓库共 128 个测试（其中 22 个标着「安全 N」）；其中 `tests/integration.test.js` 末尾有一组标着「安全 N」的回归用例，
+仓库共 132 个测试（其中 22 个标着「安全 N」）；其中 `tests/integration.test.js` 末尾有一组标着「安全 N」的回归用例，
 每一条都对应一个曾经**真实存在且已实测复现**的绕过路径。
+
+
+---
+
+## 📄 server/word-rules.js
+
+````js
+// 「一个合法的目标词长什么样」的唯一来源。
+//
+// 为什么要集中在一处：会话绑定的词、输入校验的词、词典查询的词，三者必须用**同一套归一化**，
+// 否则会出现"存的是 A、比的是 B"这类门禁漏洞；而且客户端 state-machine.js 里有一份等价实现，
+// 改这里时请同步改那边（有单元测试分别覆盖两者）。
+//
+// 允许：英文字母，以及**词与词之间的**空格 / 连字符 / 撇号（词典里有 "nice day"、"well-known"、"don't"）。
+// 不允许：首尾是分隔符、连续分隔符、数字、汉字等其它字符。
+
+export const WORD_RE = /^[a-z]+(?:[ '-][a-z]+)*$/;
+
+// 归一化：去首尾空白、转小写、把连续空白折叠成一个空格
+export function normalizeWord(raw) {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+export function isValidWord(word) {
+  return WORD_RE.test(word);
+}
+````
 
 
 ---
@@ -193,11 +226,11 @@ export function sessionUnlocksPronunciation(session, word) {
 
 import { Router } from 'express';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
+import { WORD_RE, normalizeWord } from '../word-rules.js';
 import { createSession, getSession, recordTypingSuccess } from '../sessions.js';
 
-const WORD_RE = /^[a-z'-]+$/;
+const normalize = normalizeWord;
 
-const normalize = (s) => String(s ?? '').trim().toLowerCase();
 
 // 输了但不对时，只告诉孩子「第几个字母再看看」——不泄露正确字母（需求 2.1）
 export function hintFor(typed, target) {
@@ -640,6 +673,7 @@ export function decideOutcome(result, passScore) {
 import { Router } from 'express';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
 import { getSession, markMeaningShown, sessionUnlocksMeaning } from '../sessions.js';
+import { normalizeWord as normalizeWordShared } from '../word-rules.js';
 import {
   getVocabWord,
   getLearnedWord,
@@ -650,9 +684,8 @@ import {
   graduateWord,
 } from '../vocab.js';
 
-function normalizeWord(raw) {
-  return String(raw ?? '').trim().toLowerCase();
-}
+// 与会话/词典用同一套归一化（含空格折叠），否则门禁比对会错位
+const normalizeWord = normalizeWordShared;
 
 function translationLines(dictDb, word, maxLines) {
   const row = dictDb
@@ -1005,6 +1038,7 @@ import { Router } from 'express';
 import { findSuggestions } from '../suggest.js';
 import { searchZh } from '../zh-search.js';
 import { getSession, sessionUnlocksPronunciation } from '../sessions.js';
+import { WORD_RE, normalizeWord } from '../word-rules.js';
 import { getLearnedWord } from '../vocab.js';
 import { getProfileBundle } from '../settings.js';
 import { lookupLimitState } from '../limits.js';
@@ -1012,11 +1046,7 @@ import { lookupLimitState } from '../limits.js';
 export function createDictRouter({ getDictDb, userDb }) {
   const router = Router();
 
-  const WORD_RE = /^[a-z'-]+$/;
-
-  function normalize(raw) {
-    return String(raw ?? '').trim().toLowerCase();
-  }
+  const normalize = normalizeWord;
 
   function lookup(db, wordLower) {
     return db
@@ -1328,12 +1358,14 @@ export function buildExamText(word, category = 'read_word') {
 }
 
 function businessFor(cmd, word, aus) {
+  // 含空格的短语（"nice day"）用句子模式：单词模式下讯飞评不准，且试题标记不同
+  const category = /\s/.test(word) ? 'read_sentence' : 'read_word';
   const business = {
     sub: 'ise',
     ent: 'en_vip',           // 英文评测
-    category: 'read_word',   // 单词模式：孩子读一个单词
+    category,
     cmd,
-    text: buildExamText(word),
+    text: buildExamText(word, category),
     tte: 'utf-8',
     ttp_skip: true,          // 跳过文本上传阶段
     aue: 'raw',              // 裸 PCM
@@ -2450,6 +2482,24 @@ test('生态接口：stats / garden / theme', async () => {
 });
 
 /* ============ 安全回归：这些路径以前真的能绕过门槛 ============ */
+
+test('回归【用户实测发现】：含空格的短语能查、能绑定、能输入通过', async () => {
+  // 曾经的问题：中文入口给出 "nice day" 这样的候选，而输入校验只允许字母/连字符/撇号，
+  // 孩子照抄也永远输不过（一直提示"只能输入英文字母哦"）。
+  const cw = await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'nice day' } });
+  assert.equal(cw.data.exists, true); // 英文入口也能查短语
+
+  const zh = await call('/api/search-zh', { method: 'POST', profile: profileA, body: { query: '美好的一天' } });
+  assert.ok(zh.data.results.some((r) => r.word === 'nice day'));
+
+  const sid = SID();
+  const bound = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'nice day', mode: 'zh' } });
+  assert.equal(bound.status, 200);
+  const typed = await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid, typed: 'Nice   Day ' } });
+  assert.equal(typed.data.ok, true, JSON.stringify(typed.data)); // 大小写/多余空格都能归一化
+  assert.equal(typed.data.done, true);
+  assert.equal((await call('/api/pronunciation/nice%20day', { profile: profileA, session: sid })).status, 200);
+});
 
 test('安全 1：没完成输入就不能跟读（直接调 /api/score 也会被拒）', async () => {
   const r = await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'computer', sessionId: SID(), mockScore: 100 } });

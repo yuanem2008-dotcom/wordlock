@@ -348,6 +348,24 @@ test('生态接口：stats / garden / theme', async () => {
 
 /* ============ 安全回归：这些路径以前真的能绕过门槛 ============ */
 
+test('回归【用户实测发现】：含空格的短语能查、能绑定、能输入通过', async () => {
+  // 曾经的问题：中文入口给出 "nice day" 这样的候选，而输入校验只允许字母/连字符/撇号，
+  // 孩子照抄也永远输不过（一直提示"只能输入英文字母哦"）。
+  const cw = await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'nice day' } });
+  assert.equal(cw.data.exists, true); // 英文入口也能查短语
+
+  const zh = await call('/api/search-zh', { method: 'POST', profile: profileA, body: { query: '美好的一天' } });
+  assert.ok(zh.data.results.some((r) => r.word === 'nice day'));
+
+  const sid = SID();
+  const bound = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'nice day', mode: 'zh' } });
+  assert.equal(bound.status, 200);
+  const typed = await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid, typed: 'Nice   Day ' } });
+  assert.equal(typed.data.ok, true, JSON.stringify(typed.data)); // 大小写/多余空格都能归一化
+  assert.equal(typed.data.done, true);
+  assert.equal((await call('/api/pronunciation/nice%20day', { profile: profileA, session: sid })).status, 200);
+});
+
 test('安全 1：没完成输入就不能跟读（直接调 /api/score 也会被拒）', async () => {
   const r = await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'computer', sessionId: SID(), mockScore: 100 } });
   assert.equal(r.status, 403);

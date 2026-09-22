@@ -172,12 +172,14 @@ export function buildExamText(word, category = 'read_word') {
 }
 
 function businessFor(cmd, word, aus) {
+  // 含空格的短语（"nice day"）用句子模式：单词模式下讯飞评不准，且试题标记不同
+  const category = /\s/.test(word) ? 'read_sentence' : 'read_word';
   const business = {
     sub: 'ise',
     ent: 'en_vip',           // 英文评测
-    category: 'read_word',   // 单词模式：孩子读一个单词
+    category,
     cmd,
-    text: buildExamText(word),
+    text: buildExamText(word, category),
     tte: 'utf-8',
     ttp_skip: true,          // 跳过文本上传阶段
     aue: 'raw',              // 裸 PCM

@@ -60,7 +60,7 @@ test('findSuggestions：只用首字母+长度筛选后再算距离（构建的�
 
   try {
     const report = await buildDict({ rawDir: fixtureDir, outFile });
-    assert.equal(report.kept, 29); // 全部 29 行都有中文释义
+    assert.equal(report.kept, 30); // 全部 30 行都有中文释义
 
     const db = new Database(outFile, { readonly: true });
     const row = db.prepare('SELECT * FROM dict WHERE word_lower = ?').get('apple');

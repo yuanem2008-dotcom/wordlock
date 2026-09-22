@@ -14,6 +14,7 @@ const outFile = path.join(root, 'docs', 'SECURITY-REVIEW.md');
 
 // 与「孩子能不能绕过门槛」直接相关的文件，按阅读顺序
 const FILES = [
+  'server/word-rules.js',
   'server/sessions.js',
   'server/routes/session.js',
   'server/routes/events.js',
@@ -64,13 +65,16 @@ const header = `# WordLock —— 安全审阅包（门槛是否可被绕过）
 4. **快速查看只免除"跟读"，不免除"输入"**：\`/api/quick-peek\` 要求 \`session.typing_count >= 1\`，
    **中英文入口都要求**（否则声明 \`mode='zh'\` 就能绕过）。它直接返回释义、不走 \`/api/meaning\`，
    所以这条判断必须写在它自己里面。
-5. \`/api/events\` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
-6. 求助通关由服务端判定：\`POST /api/help\` 内部查 \`learn_sessions.read_fail >= helpAfterFails\`。
-7. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
-8. **同一段录音重复提交不重复计数**（\`/api/score\` 的音频指纹），返回 \`duplicate_audio\`。
+5. **词的校验与归一化只有一个来源**：\`server/word-rules.js\`（客户端 \`public/state-machine.js\` 有等价实现，改一处要同步另一处）。
+   允许字母与词间的空格/连字符/撇号（词典里有 \`nice day\` 这类短语）——**应用给出的候选必须能被孩子输入**，
+   否则会出现「候选里显示 nice day、但输入时永远提示只能输入英文字母」这种自相矛盾。
+6. \`/api/events\` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
+7. 求助通关由服务端判定：\`POST /api/help\` 内部查 \`learn_sessions.read_fail >= helpAfterFails\`。
+8. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
+9. **同一段录音重复提交不重复计数**（\`/api/score\` 的音频指纹），返回 \`duplicate_audio\`。
    注意两个易错点：判重对**通过和失败都生效**（否则回放失败的录音可刷够 read_fail 白拿求助通关）；
    指纹记满是**先进先出丢最早的**，不是 clear() 全清（否则交够若干段就能重放最早那段）。
-9. 启动强检查：\`SCORER=mock\` 且没有 \`WORDLOCK_DEV=1\` → 拒绝启动；密钥缺失 → 拒绝启动
+10. 启动强检查：\`SCORER=mock\` 且没有 \`WORDLOCK_DEV=1\` → 拒绝启动；密钥缺失 → 拒绝启动
    （检查在 \`boot()\` 里，任何入口点都绕不过去）。
 
 > ⚠️ 注意：\`server/sessions.js\`（状态层，提供状态函数）与 \`server/routes/session.js\`
@@ -98,7 +102,7 @@ const header = `# WordLock —— 安全审阅包（门槛是否可被绕过）
 
 ## 测试
 
-仓库共 128 个测试（其中 22 个标着「安全 N」）；其中 \`tests/integration.test.js\` 末尾有一组标着「安全 N」的回归用例，
+仓库共 132 个测试（其中 22 个标着「安全 N」）；其中 \`tests/integration.test.js\` 末尾有一组标着「安全 N」的回归用例，
 每一条都对应一个曾经**真实存在且已实测复现**的绕过路径。
 `;
 

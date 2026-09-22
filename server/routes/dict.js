@@ -4,6 +4,7 @@ import { Router } from 'express';
 import { findSuggestions } from '../suggest.js';
 import { searchZh } from '../zh-search.js';
 import { getSession, sessionUnlocksPronunciation } from '../sessions.js';
+import { WORD_RE, normalizeWord } from '../word-rules.js';
 import { getLearnedWord } from '../vocab.js';
 import { getProfileBundle } from '../settings.js';
 import { lookupLimitState } from '../limits.js';
@@ -11,11 +12,7 @@ import { lookupLimitState } from '../limits.js';
 export function createDictRouter({ getDictDb, userDb }) {
   const router = Router();
 
-  const WORD_RE = /^[a-z'-]+$/;
-
-  function normalize(raw) {
-    return String(raw ?? '').trim().toLowerCase();
-  }
+  const normalize = normalizeWord;
 
   function lookup(db, wordLower) {
     return db

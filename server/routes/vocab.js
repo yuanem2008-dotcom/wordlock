@@ -3,6 +3,7 @@
 import { Router } from 'express';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
 import { getSession, markMeaningShown, sessionUnlocksMeaning } from '../sessions.js';
+import { normalizeWord as normalizeWordShared } from '../word-rules.js';
 import {
   getVocabWord,
   getLearnedWord,
@@ -13,9 +14,8 @@ import {
   graduateWord,
 } from '../vocab.js';
 
-function normalizeWord(raw) {
-  return String(raw ?? '').trim().toLowerCase();
-}
+// 与会话/词典用同一套归一化（含空格折叠），否则门禁比对会错位
+const normalizeWord = normalizeWordShared;
 
 function translationLines(dictDb, word, maxLines) {
   const row = dictDb

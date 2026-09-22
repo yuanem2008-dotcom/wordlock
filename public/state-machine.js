@@ -9,12 +9,18 @@ export function positionMessage(position) {
   return `第 ${position} 个字母再看看`;
 }
 
+// 归一化：去首尾空白、转小写、把连续空白折叠成一个空格
+// ⚠️ 必须与 server/word-rules.js 保持一致（那边有同样的实现）
 export function normalizeInput(raw) {
-  return String(raw ?? '').trim().toLowerCase();
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
 }
 
+// 允许英文字母，以及词与词之间的空格/连字符/撇号（词典里有 "nice day"、"well-known"、"don't"）
 export function isValidWordChars(word) {
-  return /^[a-z'-]+$/.test(word);
+  return /^[a-z]+(?:[ '-][a-z]+)*$/.test(word);
 }
 
 // 一个查词流程的输入阶段。生命周期：

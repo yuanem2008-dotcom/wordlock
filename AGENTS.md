@@ -39,7 +39,7 @@
 | `public/app.js` | 界面与流程编排（单文件，较长） |
 | `public/tts.js`、`audio-record.js` | 标准读音（男性嗓音优先级）、录音并转 16k/16bit/单声道 WAV |
 | `scripts/build-dict.js` | ECDICT → `dict.db`（含中文反查索引 `zh_index`） |
-| `tests/` | `node:test` 共 128 个（含 22 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
+| `tests/` | `node:test` 共 132 个（含 22 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
 
 ## 不能改坏的硬约束（都是联调/踩坑换来的，改动请连带跑测试）
 
@@ -49,6 +49,9 @@
 - **WAV 取 PCM 必须按 RIFF 块解析**（`extractPcm`），不能写死跳过 44 字节。
 - **前端禁止 `window.confirm/alert/prompt`**：内嵌浏览器与 iPad 会屏蔽系统弹窗（confirm 直接返回 false，操作静默失败）。用应用内的 `askConfirm()` / `toast()`。
 - **`public/tts.js` 不能取 `voices[0]`**：macOS 上那是机器人音 Albert，要按候选列表挑饱满男声。
+- **词的校验/归一化只有一个来源**：`server/word-rules.js`（客户端 `public/state-machine.js` 有等价实现，改一处必须同步另一处）。
+  允许字母与**词间的空格**/连字符/撇号 —— 因为词典里有 `nice day` 这类短语，而**应用给出的候选必须能被孩子输入**
+  （曾出现「候选显示 nice day、输入却永远提示只能输入英文字母」的自相矛盾，用户实测发现）。
 - 所有用户数据表都带 `profile_id`，请求带 `X-Profile-Id` 头。
 
 ### 门槛不可绕过（这九条是核心不变量，改动务必跑安全回归测试）
@@ -87,7 +90,7 @@
 ```bash
 npm start              # HTTP（电脑上用；本会话沙箱内不能监听端口）
 npm run start:https    # HTTPS（iPad 用麦克风时需要，先 npm run certs）
-npm test               # 128 个测试（单元 + 进程内集成 + 安全回归）
+npm test               # 132 个测试（单元 + 进程内集成 + 安全回归）
 npm run build-dict     # 由 data/raw 的 ECDICT 重建 data/dict.db（约 35 秒）
 npm run try-scorer     # 用 macOS say 合成人声送真实评测，验证密钥与计分是否正常
 npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（全量源码快照，供外部 AI 审阅）

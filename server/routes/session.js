@@ -6,11 +6,11 @@
 
 import { Router } from 'express';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
+import { WORD_RE, normalizeWord } from '../word-rules.js';
 import { createSession, getSession, recordTypingSuccess } from '../sessions.js';
 
-const WORD_RE = /^[a-z'-]+$/;
+const normalize = normalizeWord;
 
-const normalize = (s) => String(s ?? '').trim().toLowerCase();
 
 // 输了但不对时，只告诉孩子「第几个字母再看看」——不泄露正确字母（需求 2.1）
 export function hintFor(typed, target) {

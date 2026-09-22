@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   createTypingSession,
   normalizeInput,
+  isValidWordChars,
   MSG_INVALID,
   MSG_NOT_FOUND,
   MSG_LENGTH,
@@ -17,6 +18,33 @@ test('归一化：去首尾空格、转小写', () => {
   assert.equal(normalizeInput('WELL-KNOWN'), 'well-known');
   assert.equal(normalizeInput("DON'T"), "don't");
   assert.equal(normalizeInput('   '), '');
+});
+
+test('归一化：词与词之间可以有空格（词典里有 "nice day" 这类短语）', () => {
+  assert.equal(normalizeInput('  Nice   Day '), 'nice day'); // 连续空格折叠成一个
+  assert.equal(normalizeInput('nice day'), 'nice day');
+});
+
+test('允许的字符：字母、词间空格、连字符、撇号', () => {
+  assert.ok(isValidWordChars('apple'));
+  assert.ok(isValidWordChars('nice day'));
+  assert.ok(isValidWordChars('well-known'));
+  assert.ok(isValidWordChars("don't"));
+  assert.ok(!isValidWordChars('nice  day')); // 连续空格（归一化后不会出现）
+  assert.ok(!isValidWordChars(' nice day')); // 首尾空格
+  assert.ok(!isValidWordChars('nice day '));
+  assert.ok(!isValidWordChars('-nice'));
+  assert.ok(!isValidWordChars('nice-'));
+  assert.ok(!isValidWordChars('苹果')); // 汉字
+  assert.ok(!isValidWordChars('apple1')); // 数字
+});
+
+test('回归：中文入口给出的含空格候选，孩子能照抄输入通过（曾经永远输不过）', () => {
+  const s = createTypingSession({ requiredCount: 1, mode: 'zh', targetVisible: true });
+  s.setTarget('nice day');
+  const r = s.nextInput('Nice  Day '); // 大小写/空格多少都归一化
+  assert.equal(r.status, 'done');
+  assert.equal(r.target, 'nice day');
 });
 
 test('非法字符被拒绝，不计数', () => {
