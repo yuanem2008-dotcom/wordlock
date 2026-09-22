@@ -471,3 +471,6 @@ body.theme-garden { --bg: #f2f8ec; }
 .overlay-star { font-size: 52px; }
 .overlay-title { font-size: 28px; }
 .overlay-text { font-size: 19px; color: var(--ink-soft); }
+
+/* 版本号（小字，家长排查用） */
+.appver { font-size: 12px; color: #b9ae99; }

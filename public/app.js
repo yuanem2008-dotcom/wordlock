@@ -7,10 +7,10 @@ import {
   MSG_INVALID,
   MSG_LENGTH,
   positionMessage,
-} from './state-machine.js?v=20260922c';
-import { unlockTTS, speakWord, listEnglishVoices } from './tts.js?v=20260922b';
-import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js?v=20260922b';
-import { createRecorder } from './audio-record.js?v=20260922b';
+} from './state-machine.js?v=20260922e';
+import { unlockTTS, speakWord, listEnglishVoices } from './tts.js?v=20260922e';
+import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js?v=20260922e';
+import { createRecorder } from './audio-record.js?v=20260922e';
 
 const AVATARS = ['🐱', '🐶', '🦊', '🐼', '🐸', '🦉', '🐳', '🦄'];
 const PRESET_CARDS = [
@@ -50,6 +50,8 @@ const state = {
   celebrationTimer: null,
   doneTimer: null,
 };
+
+const APP_VERSION = '20260922e';
 
 const isDev = () => new URLSearchParams(location.search).has('dev');
 
@@ -1704,6 +1706,7 @@ async function renderParentProfileSelects() {
 }
 
 async function init() {
+  $('appver').textContent = 'v' + APP_VERSION;
   bind();
   const { profiles } = await api('/api/profiles', { noProfile: true });
   if (!profiles.length) {

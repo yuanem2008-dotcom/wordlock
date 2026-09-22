@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>WordLock 麦克风诊断</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main id="app" style="max-width:560px;margin:0 auto;padding:24px;display:flex;flex-direction:column;gap:16px;">
+    <h1 style="font-size:28px;text-align:center;">麦克风诊断</h1>
+    <p style="color:#8a8378;font-size:17px;line-height:1.6;text-align:center;">
+      这个页面只用来检查"录音 → 评分"的整条链路，不会修改任何数据。<br>
+      点下面的按钮，**用正常音量念 "apple"**，3 秒后自动结束。
+    </p>
+
+    <label style="font-size:16px;color:#8a8378;">用哪个档案测试（只影响记录归属）</label>
+    <select id="profile" class="text-input" style="min-height:48px;font-size:17px;"></select>
+
+    <button id="btn-go" class="btn btn-big" style="background:#58a65c;color:#fff;min-height:72px;font-size:24px;">
+      🎤 开始诊断（念 apple）
+    </button>
+
+    <div class="volume" style="height:14px;background:#eee7d8;border-radius:999px;overflow:hidden;" hidden>
+      <div id="volfill" style="height:100%;width:0;background:#58a65c;border-radius:999px;transition:width .08s linear;"></div>
+    </div>
+
+    <div id="report" style="display:flex;flex-direction:column;gap:10px;"></div>
+
+    <button id="btn-again" class="btn" style="font-size:18px;">再测一次</button>
+    <a href="/" style="text-align:center;color:#8a8378;font-size:16px;">← 回到查词器</a>
+  </main>
+
+  <script type="module">
+    import { createRecorder } from './audio-record.js?v=diag';
+
+    const $ = (id) => document.getElementById(id);
+    const report = $('report');
+    const row = (label, value, color) => {
+      const d = document.createElement('div');
+      d.style.cssText = `background:#fff;border-radius:14px;padding:12px 16px;font-size:17px;line-height:1.5;${color ? 'color:' + color : ''}`;
+      d.innerHTML = `<b>${label}</b>：${value}`;
+      report.prepend(d);
+    };
+
+    // 档案列表
+    const profiles = await (await fetch('/api/profiles')).json().catch(() => ({ profiles: [] }));
+    for (const p of profiles.profiles ?? []) {
+      const o = document.createElement('option');
+      o.value = p.id; o.textContent = `${p.avatar} ${p.name}`;
+      $('profile').append(o);
+    }
+
+    let recorder = null, recording = false;
+
+    $('btn-again').style.display = 'none';
+    $('btn-go').addEventListener('click', async () => {
+      report.textContent = '';
+      $('btn-go').disabled = true;
+      $('btn-go').textContent = '录音中…';
+      document.querySelector('.volume').hidden = false;
+
+      try {
+        recorder = recorder || createRecorder();
+        let peakVol = 0;
+        await recorder.start((level) => {
+          peakVol = Math.max(peakVol, level);
+          $('volfill').style.width = Math.round(level * 100) + '%';
+        });
+        recording = true;
+        // 3 秒后自动结束
+        await new Promise((r) => setTimeout(r, 3000));
+        const result = await recorder.stop();
+        recording = false;
+        $('volfill').style.width = '0%';
+
+        row('采集到音频块', `${result.chunks} 块，时长 ${result.durationSec.toFixed(2)} 秒`,
+            result.chunks === 0 ? '#c0392b' : '#2c3e50');
+        row('音量峰值', String(result.peak.toFixed(4)),
+            result.tooQuiet ? '#c0392b' : '#27ae60');
+
+        if (result.chunks === 0) {
+          row('结论', '浏览器完全没有采集到音频 —— 大概率是麦克风权限被拒，或没有麦克风。请在浏览器地址栏的麦克风图标里允许权限后重试。', '#c0392b');
+        } else if (result.tooQuiet) {
+          row('结论', '采集到了数据但音量接近 0 —— 请对着麦克风用正常音量说话，再点一次。', '#c0392b');
+        } else {
+          row('结论', '采集正常，正在送给讯飞评分…', '#27ae60');
+          await sendScore(result);
+        }
+      } catch (err) {
+        row('出错', String(err.message || err), '#c0392b');
+      }
+      $('btn-go').disabled = false;
+      $('btn-go').textContent = '🎤 再来一次（念 apple）';
+      $('btn-again').style.display = '';
+    });
+
+    async function sendScore(result) {
+      let bin = '';
+      const bytes = new Uint8Array(result.wav);
+      for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+      const audioBase64 = btoa(bin);
+
+      const pid = $('profile').value;
+      const sid = 'diag-' + crypto.randomUUID();
+      const H = { 'Content-Type': 'application/json', 'X-Profile-Id': pid, 'X-Session-Id': sid };
+
+      // 走真实流程：绑定 apple → 服务端确认输入完成 → 评分
+      await fetch('/api/session', { method: 'POST', headers: H, body: JSON.stringify({ sessionId: sid, word: 'apple', mode: 'en' }) });
+      await fetch('/api/typing', { method: 'POST', headers: H, body: JSON.stringify({ sessionId: sid, typed: 'apple' }) });
+
+      const res = await fetch('/api/score', { method: 'POST', headers: H, body: JSON.stringify({ word: 'apple', sessionId: sid, audioBase64 }) });
+      const data = await res.json().catch(() => ({}));
+
+      if (data.error) {
+        row('讯飞返回', `${data.error} —— ${data.message || ''}`, '#c0392b');
+        row('这意味着', data.error === 'no_speech'
+          ? '讯飞没有从这段录音里识别出 "apple" 的发音。如果音量峰值正常，说明录音内容里确实没有清楚的 "apple"（比如环境太吵、距离远）。'
+          : '评测环节出了问题，请把这段文字发给 Claude。', '#c0392b');
+      } else {
+        row('讯飞评分', `${data.score} 分（${data.passed ? '通过' : '未达通过线'}）`,
+            data.passed ? '#27ae60' : '#e67e22');
+        row('这意味着', data.passed
+          ? '整条链路正常！回到查词器正常使用即可。'
+          : '链路正常，但这遍发音没达到通过线 —— 多念几遍，或让家长在家长模式里把分数线调低一点。', data.passed ? '#27ae60' : '#e67e22');
+      }
+    }
+  </script>
+</body>
+</html>
