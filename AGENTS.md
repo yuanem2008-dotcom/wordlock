@@ -111,19 +111,28 @@ npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时�
 5. `server/routes/parent.js` 的"每周汇总 / 放弃点判定"（需求 2.10：未到 `meaning_shown` 且 10 分钟无新事件即视为放弃）。
 6. 数据量与性能：词典 337 万词条、中文索引 270 万行，`zh_index` 的 `rank/hot` 分档与查询计划。
 
-## 本机部署现状（2026-09-22）
+## 本机部署现状（2026-09-22 实测）
 
-- **服务由 macOS LaunchAgent 托管**：`~/Library/LaunchAgents/com.wilburread.wordlock.plist`
-  直接跑 `/opt/homebrew/bin/node /Users/ericyuan/Desktop/word-lock/server/index.js`
-  （不是 `npm start`，这样 launchd 监管的就是真正的服务进程），`KeepAlive` + `RunAtLoad`。
-  日志：`~/Library/Logs/wordlock.out.log` / `wordlock.err.log`；重启用
-  `launchctl kickstart -k gui/$(id -u)/com.wilburread.wordlock`。
-- **公网入口**：`https://wordlock.wilburread.com`，由已有的 Cloudflare 隧道（`dash-mac`，
-  ID `41c85f1c-060f-4bf4-813a-5cf13c4d4943`，配置在 `~/.cloudflared/`）转发到本机 3000 端口。
-  TLS 由 Cloudflare 终止，所以本机不需要 HTTPS/证书（`npm run certs` 那套只是局域网备选）。
-- 因此：**不要在别处再跑 `npm start`**（会抢 3000 端口，让 LaunchAgent 反复重启）。
-- 应用在评测配置不对时会**主动拒绝启动并退出**（如 `SCORER=mock` 却没用 `WORDLOCK_DEV=1`）——
-  这是有意的设计，遇到它反复重启请看 err.log，不要去改代码绕过检查。
+- **服务由 macOS LaunchAgent 托管**（两个 plist 都在 `~/Library/LaunchAgents/`）：
+  - `com.wilburread.wordlock`：直接跑 `/opt/homebrew/bin/node …/word-lock/server/index.js`
+    （刻意不用 `npm start`，否则 launchd 监管的是 npm 这个壳，KeepAlive 判断会失真）；
+    `WorkingDirectory` 必须是应用目录（要从这里读 `.env` 和 `data/`）。
+  - `com.wilburread.cloudflared`：跑 `~/.cloudflared/cloudflared tunnel --no-autoupdate run dash-mac`。
+  - 两者都是 `RunAtLoad` + `KeepAlive` + `ThrottleInterval 15`，日志在 `~/Library/Logs/`。
+  - 重启：`launchctl kickstart -k gui/501/<label>`；查状态：`launchctl print gui/501/<label>`。
+- **公网入口**：`https://wordlock.wilburread.com` → 本机 3000。TLS 由 Cloudflare 终止，
+  所以本机不需要 HTTPS/证书（`npm run certs` 那套只是局域网备选）。
+- ⚠️ **不要再另外跑 `npm start`**：会抢 3000 端口，让 LaunchAgent 反复重启。
+- ⚠️ **这台机器会杀掉后台进程**：`cmd &` / `nohup` 起的进程在命令返回后会被清掉；
+  要长期存活必须用 `launchctl bootstrap`（进程 `ppid=1`）。所以别指望 `npm start &` 能常驻。
+- **`dash.wilburread.com` 不由这台 Mac 服务**：它由账号里另一条隧道（`wilbur`）在 Windows 机器上提供，
+  本机 8787 端口没有任何进程在听 → config.yml 里那条 dash ingress 实际是**空转配置**。
+  结论：在这台 Mac 上做隧道操作**不会影响 dash**。
+- **启动守卫是有意的**：评测配置不合法（如 `SCORER=mock` 却没设 `WORDLOCK_DEV=1`）时应用会拒绝启动并退出。
+  遇到它反复重启请看 `~/Library/Logs/wordlock.err.log`，不要去改代码或加环境变量绕过检查。
+- **`~/.cloudflared/cert.pem` 里的 API Token 已失效**（`/user/tokens/verify` 报 Invalid，`dns_records` 查询报鉴权错误），
+  但 `tunnel list` / `tunnel info` / `tunnel route dns` 仍可用（走隧道凭据）。
+  以后要新增域名，DNS 记录可能得去 Cloudflare 面板手动加。
 
 ## 背景
 
