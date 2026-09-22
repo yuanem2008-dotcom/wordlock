@@ -111,6 +111,20 @@ npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时�
 5. `server/routes/parent.js` 的"每周汇总 / 放弃点判定"（需求 2.10：未到 `meaning_shown` 且 10 分钟无新事件即视为放弃）。
 6. 数据量与性能：词典 337 万词条、中文索引 270 万行，`zh_index` 的 `rank/hot` 分档与查询计划。
 
+## 本机部署现状（2026-09-22）
+
+- **服务由 macOS LaunchAgent 托管**：`~/Library/LaunchAgents/com.wilburread.wordlock.plist`
+  直接跑 `/opt/homebrew/bin/node /Users/ericyuan/Desktop/word-lock/server/index.js`
+  （不是 `npm start`，这样 launchd 监管的就是真正的服务进程），`KeepAlive` + `RunAtLoad`。
+  日志：`~/Library/Logs/wordlock.out.log` / `wordlock.err.log`；重启用
+  `launchctl kickstart -k gui/$(id -u)/com.wilburread.wordlock`。
+- **公网入口**：`https://wordlock.wilburread.com`，由已有的 Cloudflare 隧道（`dash-mac`，
+  ID `41c85f1c-060f-4bf4-813a-5cf13c4d4943`，配置在 `~/.cloudflared/`）转发到本机 3000 端口。
+  TLS 由 Cloudflare 终止，所以本机不需要 HTTPS/证书（`npm run certs` 那套只是局域网备选）。
+- 因此：**不要在别处再跑 `npm start`**（会抢 3000 端口，让 LaunchAgent 反复重启）。
+- 应用在评测配置不对时会**主动拒绝启动并退出**（如 `SCORER=mock` 却没用 `WORDLOCK_DEV=1`）——
+  这是有意的设计，遇到它反复重启请看 err.log，不要去改代码绕过检查。
+
 ## 背景
 
 - 需求文档 v3（分 7 个阶段）由用户提供，**阶段 1～6 已完成**，阶段 1B（中文查词）也已完成；**阶段 7（例句 / 导入教材词表 / 音节级反馈）未做**，做之前需用户确认。

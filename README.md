@@ -157,81 +157,70 @@ cd ~/Desktop/word-lock && npm run try-scorer
 > 开发时想不用麦克风测流程：在 `.env` 里加 `WORDLOCK_DEV=1` 并在浏览器地址后加 `?dev=1`（会出现"模拟评分"滑块）。
 > **注意**：`WORDLOCK_DEV` 只是让自己调试用的开关；不设它、又用着 `SCORER=mock`，服务器会直接拒绝启动。
 
-## 四、iPad 上使用（要用麦克风就必须做这步）
+## 四、在 iPad / 手机上使用
 
-浏览器只在 **HTTPS** 或 **localhost** 下允许用麦克风。iPad 访问电脑属于局域网，所以必须给电脑配一张本地证书。
+### 推荐：公网地址（不用装证书，任何有网的地方都能用）
 
-**前提**：iPad 和电脑连**同一个 Wi-Fi**；服务器跑在电脑上，所以**电脑要开着机、别睡眠**。
+```
+https://wordlock.wilburread.com
+```
 
-### 第 1 步：生成证书（在电脑上做一次）
+- 手机上用 4G/5G、在外面、在学校都能打开（不要求和电脑同一个 Wi-Fi）
+- **不需要装任何证书**（Cloudflare 提供公共可信证书），麦克风直接可用
+- iPad 用 Safari 打开 → 分享 → **添加到主屏幕**，就能像 App 一样全屏使用
+- 第一次点麦克风会问权限 → 选「允许」
+
+**前提**：服务器就是这台 Mac，所以——
+
+| 要保证 | 说明 |
+|---|---|
+| 电脑开着、**不睡眠** | 合盖/睡眠 = 网站打不开（建议插电，并在「设置 → 锁定屏幕」里关掉睡眠） |
+| 电脑能上网 | 跟读评分要连讯飞；隧道也要往外连 |
+| 家里的电和网正常 | 断电断网就都停了 |
+
+### 备用：只在同一个 Wi-Fi 下用（不经过公网）
+
+不想走公网时，也可以用局域网：`npm run certs` 生成证书 → `npm run start:https` 启动 →
+iPad 打开终端打印的 `https://电脑IP:3000`。这条路**要先给 iPad 装根证书**：
+
+1. `mkcert -CAROOT` 看目录 → 里面有 `rootCA.pem`
+2. 隔空投送到 iPad → 点开 → 设置里「安装」
+3. **设置 → 通用 → 关于本机 → 拉到最后「证书信任设置」→ 打开 mkcert 那一项**（不做这步 Safari 会一直提示"不安全"）
+
+> 换了 Wi-Fi 或电脑换了 IP，要重新 `npm run certs`。走隧道那条路就不用管这些。
+
+### 服务平时是怎么跑起来的
+
+已经配好 macOS 的 LaunchAgent（`com.wilburread.wordlock`）：**开机自动启动，崩了自动拉起**，
+所以平时你什么都不用做。
 
 ```bash
-cd ~/Desktop/word-lock && brew install mkcert
+# 看它在不在跑
+launchctl print gui/$(id -u)/com.wilburread.wordlock | head -5
+
+# 出问题时看日志
+tail -20 ~/Library/Logs/wordlock.out.log    # 正常输出
+tail -20 ~/Library/Logs/wordlock.err.log    # 报错看这个
+
+# 重启
+launchctl kickstart -k gui/$(id -u)/com.wilburread.wordlock
 ```
 
-```bash
-cd ~/Desktop/word-lock && npm run certs
-```
-
-`npm run certs` 会自动找出电脑在局域网里的地址（形如 `192.168.x.x`）写进证书，并告诉你证书放在哪。
-
-> 这一步也可能要你输一次 Mac 密码（把本地根证书装进系统信任列表，这样**电脑自己的浏览器**也不会报“不安全”）。
-> 不想输密码就运行 `npm run certs -- --no-install`：证书照样能用，iPad 不受影响，只是电脑浏览器打开 https 会提示一次“不安全”。
->
-> 换了 Wi-Fi、或者路由器给电脑换了新 IP，就重新运行一次 `npm run certs`。
-
-### 第 2 步：用 HTTPS 启动
-
-```bash
-cd ~/Desktop/word-lock && npm run start:https
-```
-
-终端会打印：
-
-```
-WordLock 已启动（HTTPS）
-  这台电脑上打开：https://localhost:3000
-  iPad 上用这个地址：https://192.168.x.x:3000   ← 就是这一行
-```
-
-记下 iPad 那个地址。
-
-> 和 `npm start` 的区别：`npm start` 是 http（电脑上用、iPad 上不能用麦克风）；`npm run start:https` 是 https（iPad 能用麦克风）。
-> 两个不要同时开（会抢同一个端口）。
-
-### 第 3 步：把根证书装到 iPad（每台 iPad 做一次）
-
-1. 在电脑上查看根证书的位置：
-
-```bash
-mkcert -CAROOT
-```
-
-   里面有个文件 `rootCA.pem`。
-2. 把它**隔空投送（AirDrop）**到 iPad（微信发给自己也行）。
-3. iPad 上点开收到的文件 → **设置** → 顶部会出现「已下载描述文件」→ 点「安装」（要输 iPad 密码）。
-4. **关键一步**：**设置 → 通用 → 关于本机 → 拉到最后「证书信任设置」→ 把 mkcert 那一项的开关打开**。不打开这步，Safari 会一直提示"不安全"。
-
-### 第 4 步：在 iPad 上打开
-
-1. iPad 用 **Safari** 打开第 2 步记下的地址，例如 `https://192.168.x.x:3000`
-2. 第一次点麦克风会问权限 → 选「允许」（也许要先去 **设置 → Safari → 麦克风** 打开）
-3. 点 Safari 的**分享按钮 → 添加到主屏幕**，就能像 App 一样全屏使用
-
-> 已经帮你生成好的证书文件在这里（隔空投送的时候用这个）：
-> 位置是 `$(mkcert -CAROOT)/rootCA.pem`（在终端里运行 `mkcert -CAROOT` 就能看到目录）。
+> ⚠️ **不要再另外跑 `npm start`**：会和它抢 3000 端口，导致服务反复重启。
+> 要临时手动启动，先 `launchctl bootout gui/$(id -u)/com.wilburread.wordlock`。
 
 ### 遇到问题怎么办
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| Safari 提示"无法验证服务器身份" | 第 3 步的**证书信任设置**没开；或者电脑 IP 变了，重新 `npm run certs` |
-| iPad 打不开这个地址 | ① 两边不在同一个 Wi-Fi ② 电脑防火墙拦了，去 **系统设置 → 网络 → 防火墙** 允许 node 接受连接 ③ 电脑睡眠了 |
-| 电脑上打开提示不安全 | 正常跳过即可；想让电脑也信任，重跑 `npm run certs` 并同意装根证书 |
-| 地址里的 IP 变了 | 路由器重新分配了 IP。重新 `npm run certs` 并重启服务，或让路由器给电脑固定 IP |
-| 只有电脑上用 | 不用做这一节，直接 `npm start` 用 `http://localhost:3000` 就行 |
+| 公网地址打不开 | ① 电脑睡眠了或关机 ② 家里断网 ③ 隧道挂了（看 `~/.cloudflared/tunnel.log`） |
+| 换成局域网也不行 | iPad 和电脑不在同一个 Wi-Fi；或电脑防火墙拦了 node |
+| 提示"无法验证服务器身份"（只在使用备用方案时） | iPad 的「证书信任设置」没打开 |
+| 麦克风没反应 | Safari 里要先允许麦克风；页面必须是 https（隧道地址本身就是 https） |
 
 > 安全提醒：`.env` 和 `certs/` 都已被 git 忽略，证书和密钥不会进仓库。
+> 这个地址是**公开**的：知道网址的人都能打开（应用按需求不设登录，家长 PIN 只保护设置）。
+> 不想让它一直开着，就临时 `launchctl bootout` 停掉，或让 Codex 把隧道那条也停掉。
 
 ## 五、上线前检查清单（给孩子用之前扫一眼）
 
