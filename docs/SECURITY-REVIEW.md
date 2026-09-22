@@ -12,16 +12,23 @@
 
 ## 本次修复要守住的不变量
 
-1. 「输入 N 次」由**服务端**判定：`POST /api/session` 绑定目标词（服务端查词典确认存在），
-   `POST /api/typing` 由服务端比对字符串并累加；客户端上报的进度一概不算数。
+1. 「输入 N 次」由**服务端**判定，**且从 0 开始数**：`POST /api/session` 只绑定目标词
+   （服务端查词典确认存在），**不给任何次数**；只有 `/api/typing` 里服务端比对通过才算一次。
+   需求 2.1 的"第 1 次输入算 1/N"由前端把刚输入的字符串再交给 `/api/typing` 实现，孩子体感不变。
+   客户端上报的 `count/done/typing_done` 一律忽略。
 2. 会话**绑定目标词后不可改**（同一 sessionId 换词必须 403）。
 3. 释义放行必须同时满足：**同档案 + 同会话 + `session.word === 请求的词`（归一化）+ 输入已完成 +
    （跟读达标 或 求助通关 或 快速查看 或 该词已学会）**。读音同理。
    → 实现见 `server/sessions.js` 的 `sessionUnlocksMeaning()` / `sessionUnlocksPronunciation()`
-4. `/api/events` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
-5. 求助通关由服务端判定：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`。
-6. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
-7. 启动强检查：`SCORER=mock` 且没有 `WORDLOCK_DEV=1` → 拒绝启动；密钥缺失 → 拒绝启动。
+4. **快速查看只免除"跟读"，不免除"输入"**：`/api/quick-peek` 要求 `session.typing_count >= 1`，
+   **中英文入口都要求**（否则声明 `mode='zh'` 就能绕过）。它直接返回释义、不走 `/api/meaning`，
+   所以这条判断必须写在它自己里面。
+5. `/api/events` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
+6. 求助通关由服务端判定：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`。
+7. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
+8. **同一段录音重复提交不重复计数**（`/api/score` 的音频指纹），返回 `duplicate_audio`。
+9. 启动强检查：`SCORER=mock` 且没有 `WORDLOCK_DEV=1` → 拒绝启动；密钥缺失 → 拒绝启动
+   （检查在 `boot()` 里，任何入口点都绕不过去）。
 
 > ⚠️ 注意：`server/sessions.js`（状态层，提供状态函数）与 `server/routes/session.js`
 > （HTTP 路由，暴露 `/api/session`、`/api/typing`）是**两个不同的文件**。
@@ -48,7 +55,7 @@
 
 ## 测试
 
-仓库共 119 个测试；其中 `tests/integration.test.js` 末尾有一组标着「安全 N」的回归用例，
+仓库共 125 个测试（其中 19 个标着「安全 N」）；其中 `tests/integration.test.js` 末尾有一组标着「安全 N」的回归用例，
 每一条都对应一个曾经**真实存在且已实测复现**的绕过路径。
 
 
@@ -79,7 +86,7 @@ export function getSession(userDb, profileId, sessionId) {
 // 建立会话并绑定目标词。同一个 (档案, 会话) 若已存在：
 //   - 词相同 → 原样返回（幂等）
 //   - 词不同 → 拒绝（这是防止「给容易的词过关 → 改成生僻词 → 看释义」的关键）
-export function createSession(userDb, profileId, sessionId, { word, mode = 'en', counted = 0 }) {
+export function createSession(userDb, profileId, sessionId, { word, mode = 'en' }) {
   const id = SID(sessionId);
   const target = String(word ?? '').trim().toLowerCase().slice(0, 64);
   if (!id || !target) return { ok: false, reason: 'bad_request' };
@@ -97,8 +104,8 @@ export function createSession(userDb, profileId, sessionId, { word, mode = 'en',
          (profile_id, session_id, word, mode, typing_count, typing_done, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 0, ?, ?)`
     )
-    .run(profileId, id, target, mode === 'zh' ? 'zh' : 'en', Math.max(0, counted), now, now);
-  return { ok: true, session: getSession(userDb, profileId, id), completed: Math.max(0, counted) };
+    .run(profileId, id, target, mode === 'zh' ? 'zh' : 'en', 0, now, now);
+  return { ok: true, session: getSession(userDb, profileId, id), completed: 0 };
 }
 
 function update(userDb, profileId, sessionId, sets, args) {
@@ -227,26 +234,18 @@ export function createSessionRouter(userDb, getDictDb) {
     const exists = dictDb.prepare('SELECT 1 FROM dict WHERE word_lower = ? LIMIT 1').get(word);
     if (!exists) return res.status(404).json({ error: '词典里没有这个词' });
 
-    // 英文入口：孩子第 1 次输对了，算 1/N（需求 2.1）；中文入口从 0/N 开始（需求 2.6）
-    const counted = mode === 'en' ? 1 : 0;
-    const created = createSession(userDb, profileId, sessionId, { word, mode, counted });
+    // 绑定会话永远从 0 次开始：**任何一次计数都必须经过 /api/typing 的服务端校验**。
+    // （曾经这里会因 mode==='en' 白送 1 次，等于不真打字、只调一次这个接口就能让 N=1 完成。）
+    // 需求 2.1 的"第 1 次输入算 1/N"仍然满足：前端绑定后会把刚输入的字符串交给 /api/typing 校验并计 1。
+    const created = createSession(userDb, profileId, sessionId, { word, mode });
     if (!created.ok) {
       // 同一个会话被换词：拒绝（防「给容易的词过关后改词看释义」）
       return res.status(403).json({ error: '这个会话已经绑定了别的词，请重新开始' });
     }
 
-    let session = created.session;
-    let done = session.typing_done === 1;
-    // 英文入口且 N=1：第 1 次输入就直接进入下一阶段
-    if (mode === 'en' && required <= 1 && !done) {
-      const r = recordTypingSuccess(userDb, profileId, session, required);
-      session = getSession(userDb, profileId, sessionId);
-      done = r.done;
-    }
+    const session = created.session;
+    const done = session.typing_done === 1;
     const completed = Math.min(session.typing_count, required);
-    if (done) logEvent(profileId, sessionId, mode, word, 'typing_done', null);
-    logEvent(profileId, sessionId, mode, word, 'typing_ok', { completed });
-
     res.json({ ok: true, word: session.word, mode: session.mode, completed, requiredCount: required, done });
   });
 
@@ -371,6 +370,7 @@ export function createEventsRouter(userDb) {
 //   - 校准分数线由**服务端**根据自己记录的分数算，不接受客户端上报的分数。
 
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import { getScorer, scorerIsConfigured } from '../scorers/index.js';
 import { decideOutcome } from '../scoring-policy.js';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
@@ -380,6 +380,21 @@ import { graduateWord } from '../vocab.js';
 const MAX_AUDIO_BYTES = 4 * 1024 * 1024;
 const CALIBRATION_MIN_SAMPLES = 2;
 const CALIBRATION_CLAMP = [50, 75];
+
+// 防"回放同一段录音"：产品的 M 次本意是"读 M 遍"，不是"同一遍提交 M 次"。
+// 同一个会话里重复提交字节完全相同的音频不重复计数（只记最近几段，避免内存增长；
+// 进程重启后重新计数 —— 这只影响"同一秒内反复回放"的场景，不影响正常使用）。
+const audioFingerprints = new Map();
+function isRepeatedAudio(profileId, sessionId, buffer) {
+  const key = `${profileId}:${sessionId}`;
+  const hash = crypto.createHash('sha1').update(buffer).digest('hex');
+  const seen = audioFingerprints.get(key) ?? new Set();
+  if (seen.has(hash)) return true;
+  seen.add(hash);
+  if (seen.size > 8) seen.clear();
+  audioFingerprints.set(key, seen);
+  return false;
+}
 
 const normalize = (s) => String(s ?? '').trim().toLowerCase();
 
@@ -469,6 +484,18 @@ export function createScoreRouter(userDb) {
     if (outcome.kind === 'error') {
       console.warn(`[评测] ${scorer.name} 失败：${result.error}`);
       return res.json({ score: null, passed: false, error: result.error || 'scorer_error', message: outcome.message });
+    }
+
+    // 重复提交同一段录音 → 不计入通过次数（也不算失败，提示重念）
+    if (outcome.passed && buffer && isRepeatedAudio(profileId, sessionId, buffer)) {
+      return res.json({
+        score: null,
+        passed: false,
+        error: 'duplicate_audio',
+        message: '这段录音和刚才一样，再念一遍吧',
+        retry: true,
+        canHelp: session.read_fail >= bundle.settings.helpAfterFails,
+      });
     }
 
     // 只有真正跑完一次评测（通过或没通过）才计入状态
@@ -834,6 +861,12 @@ export function createChildRouter(userDb, getDictDb) {
     if (!session || session.word !== word) {
       return res.status(403).json({ error: '这个会话不对应这个词，请重新开始' });
     }
+    // 必须先至少真实输入过一次（服务端校验过的），否则等于"连一个字母都不用打就能看释义"。
+    // 需求阶段5 把按钮放在"第 1 次输入成功后"，所以门槛就是 ≥1 次真实输入；
+    // 中英文入口都要求，否则孩子只要声明 mode='zh' 就能绕过。
+    if (session.typing_count < 1) {
+      return res.status(403).json({ error: '要先把这个词输入一遍才能快速查看哦' });
+    }
 
     // pending 的词不覆盖已学会的（需求 2.8 / 阶段5）
     const existing = getVocabWord(userDb, profileId, word);
@@ -935,6 +968,161 @@ export function createChildRouter(userDb, getDictDb) {
   });
 
   return router;
+}
+````
+
+
+---
+
+## 📄 server/routes/dict.js
+
+````js
+// 词典查询接口（check-word / pronunciation / search-zh）。
+
+import { Router } from 'express';
+import { findSuggestions } from '../suggest.js';
+import { searchZh } from '../zh-search.js';
+import { getSession, sessionUnlocksPronunciation } from '../sessions.js';
+import { getLearnedWord } from '../vocab.js';
+import { getProfileBundle } from '../settings.js';
+import { lookupLimitState } from '../limits.js';
+
+export function createDictRouter({ getDictDb, userDb }) {
+  const router = Router();
+
+  const WORD_RE = /^[a-z'-]+$/;
+
+  function normalize(raw) {
+    return String(raw ?? '').trim().toLowerCase();
+  }
+
+  function lookup(db, wordLower) {
+    return db
+      .prepare(
+        `SELECT word, phonetic FROM dict WHERE word_lower = ?
+         ORDER BY CASE WHEN frq > 0 THEN 0 ELSE 1 END, frq ASC LIMIT 1`
+      )
+      .get(wordLower);
+  }
+
+  router.post('/check-word', (req, res) => {
+    const db = getDictDb();
+    if (!db) {
+      return res.status(503).json({ error: '词典还没建立，请先运行 npm run build-dict（见 README）' });
+    }
+    const word = normalize(req.body?.word);
+    if (!word || !WORD_RE.test(word)) {
+      return res.json({ exists: false, word, suggestions: [] });
+    }
+    const row = lookup(db, word);
+    if (row) {
+      // 已学会的词再次查询不设门槛（需求 2.8）
+      const learned = Boolean(getLearnedWord(userDb, req.profile.id, word));
+      const bundle = getProfileBundle(userDb, req.profile);
+      const limit = lookupLimitState(userDb, req.profile.id, bundle.settings);
+      return res.json({ exists: true, word: row.word, learned, allowed: limit.allowed, remaining: limit.remaining });
+    }
+    const wantSuggestions = Boolean(req.body?.suggest);
+    const suggestions = wantSuggestions ? findSuggestions(db, word) : [];
+    res.json({ exists: false, word, suggestions, learned: false });
+  });
+
+  router.get('/pronunciation/:word', (req, res) => {
+    const db = getDictDb();
+    if (!db) {
+      return res.status(503).json({ error: '词典还没建立，请先运行 npm run build-dict（见 README）' });
+    }
+    const word = normalize(req.params.word);
+    if (!word || !WORD_RE.test(word)) {
+      return res.status(404).json({ error: '词典里没有这个词' });
+    }
+    const row = lookup(db, word);
+    if (!row) {
+      return res.status(404).json({ error: '词典里没有这个词' });
+    }
+    // 服务器校验（需求 阶段3）：会话**绑定的是这个词**且输入已完成，或该词已学会
+    const learned = getLearnedWord(userDb, req.profile.id, word);
+    if (!learned) {
+      const session = getSession(userDb, req.profile.id, req.get('X-Session-Id'));
+      if (!sessionUnlocksPronunciation(session, word)) {
+        return res.status(403).json({ error: '要先完成输入才能听读音哦' });
+      }
+    }
+    // 音标字段可能为空：为空就不显示，前端不要自己编造音标（需求 2.2）。
+    res.json({ word: row.word, phonetic: row.phonetic || '' });
+  });
+
+  // 中文查词（需求 2.6 / 阶段 1B）：不返回音标和完整释义。
+  router.post('/search-zh', (req, res) => {
+    const db = getDictDb();
+    if (!db) {
+      return res.status(503).json({ error: '词典还没建立，请先运行 npm run build-dict（见 README）' });
+    }
+    const query = String(req.body?.query ?? '');
+    const bundle = getProfileBundle(userDb, req.profile);
+    const limit = lookupLimitState(userDb, req.profile.id, bundle.settings);
+    const results = searchZh(db, query, 8).map((item) => ({
+      ...item,
+      learned: Boolean(getLearnedWord(userDb, req.profile.id, String(item.word ?? '').toLowerCase())),
+    }));
+    res.json({ results, allowed: limit.allowed, remaining: limit.remaining });
+  });
+
+  return router;
+}
+````
+
+
+---
+
+## 📄 server/settings.js
+
+````js
+// 档案参数的读取与门槛档位计算（需求 2.5）。
+
+import { mergeSettings } from './presets.js';
+
+// 档位 → 输入次数 / 跟读次数
+export const LEVEL_COUNTS = {
+  1: { typing: 1, reading: 1 },
+  2: { typing: 2, reading: 2 },
+  3: { typing: 3, reading: 3 },
+};
+
+// 纯函数：当前生效的门槛档位，上限 3、下限 1。
+export function computeEffectiveLevel(gateLevel, autoRamp, activeDays, rampEveryActiveDays) {
+  const base = Math.min(3, Math.max(1, Math.floor(gateLevel) || 1));
+  let ramp = 0;
+  if (autoRamp && rampEveryActiveDays > 0) {
+    ramp = Math.floor(Math.max(0, Math.floor(activeDays) || 0) / rampEveryActiveDays);
+  }
+  return Math.min(3, base + ramp);
+}
+
+// 计算一个档案「有查词记录的日子」的天数（按服务器本地时间的天）。
+export function countActiveDays(userDb, profileId) {
+  const row = userDb
+    .prepare("SELECT COUNT(DISTINCT date(ts, 'localtime')) AS n FROM events WHERE profile_id = ?")
+    .get(profileId);
+  return row?.n ?? 0;
+}
+
+export function getProfileBundle(userDb, profileRow) {
+  const settings = mergeSettings(profileRow.preset, profileRow.settings_json);
+  const activeDays = countActiveDays(userDb, profileRow.id);
+  const effectiveLevel = computeEffectiveLevel(
+    settings.gateLevel,
+    settings.autoRamp,
+    activeDays,
+    settings.rampEveryActiveDays
+  );
+  return {
+    settings,
+    activeDays,
+    effectiveLevel,
+    typingCount: LEVEL_COUNTS[effectiveLevel].typing,
+    readingCount: LEVEL_COUNTS[effectiveLevel].reading,
+  };
 }
 ````
 
@@ -1747,24 +1935,25 @@ export function createApp({ userDb, dictDb }) {
 }
 
 export function boot() {
+  // 评测没配好就**拒绝启动**（放在 boot 里，任何入口点都绕不过去）
+  const problem = scorerConfigProblem();
+  if (problem) throw new Error(problem);
+
   const userDb = openUserDb();
   const dictDb = openDictDb();
   if (!dictDb) {
     console.warn('提示：还没有找到 data/dict.db，查词功能暂不可用。请先下载词典并运行 npm run build-dict（见 README）。');
   }
+
   const scorerName = (process.env.SCORER || 'mock').toLowerCase();
+  const dev = (process.env.WORDLOCK_DEV ?? '') === '1';
   if (scorerName === 'mock') {
-    console.log('评测：模拟打分（正式用请在 .env 里设置 SCORER=xunfei 并填好密钥）');
-  } else {
-    const missing =
-      scorerName === 'xunfei'
-        ? ['XUNFEI_APP_ID', 'XUNFEI_API_KEY', 'XUNFEI_API_SECRET'].filter((k) => !process.env[k])
-        : ['TENCENT_SECRET_ID', 'TENCENT_SECRET_KEY'].filter((k) => !process.env[k]);
-    console.log(
-      missing.length
-        ? `评测：${scorerName}（还没配置好，缺 ${missing.join('、')}）`
-        : `评测：${scorerName}（已配置）`
+    console.warn(
+      '\n⚠️  开发模式：评测用的是"模拟打分"，孩子说什么都会过，绝对不能这样给孩子用。\n' +
+        '   正式使用请把 .env 里的 SCORER 改成 xunfei 并删掉 WORDLOCK_DEV。\n'
     );
+  } else {
+    console.log(`评测：${scorerName}（已配置）${dev ? '，⚠️ 但开着开发模式开关 WORDLOCK_DEV' : ''}`);
   }
   return { userDb, dictDb, app: createApp({ userDb, dictDb }) };
 }
@@ -2018,17 +2207,25 @@ test('完整流程：输入 → 读音放行 → 跟读通过 → 释义放行 �
 });
 
 test('输入次数按门槛档位来（小学 1 次、初中 2 次）', async () => {
+  // 绑定会话永远从 0 次开始：任何一次计数都必须经过 /api/typing 的服务端校验
   const sid1 = SID();
   const r1 = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid1, word: 'book', mode: 'en' } });
   assert.equal(r1.data.requiredCount, 1);
-  assert.equal(r1.data.done, true); // N=1：第 1 次输入即完成
+  assert.equal(r1.data.completed, 0);
+  assert.equal(r1.data.done, false);
+  const a1 = await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid1, typed: 'book' } });
+  assert.equal(a1.data.completed, 1);
+  assert.equal(a1.data.done, true); // 小学 N=1：真实输入 1 次即完成
 
   const sid2 = SID();
   const r2 = await call('/api/session', { method: 'POST', profile: profileB, body: { sessionId: sid2, word: 'book', mode: 'en' } });
   assert.equal(r2.data.requiredCount, 2);
   assert.equal(r2.data.done, false);
-  const r3 = await call('/api/typing', { method: 'POST', profile: profileB, body: { sessionId: sid2, typed: 'book' } });
-  assert.equal(r3.data.done, true);
+  const b1 = await call('/api/typing', { method: 'POST', profile: profileB, body: { sessionId: sid2, typed: 'book' } });
+  assert.equal(b1.data.completed, 1);
+  assert.equal(b1.data.done, false); // 初中 N=2：还差一次
+  const b2 = await call('/api/typing', { method: 'POST', profile: profileB, body: { sessionId: sid2, typed: 'book' } });
+  assert.equal(b2.data.done, true);
 });
 
 test('输入错误由服务端指出位置，且不计数', async () => {
@@ -2200,6 +2397,8 @@ test('家长 PIN：连续输错会被临时锁定', async () => {
 });
 
 test('家长汇总：放弃点统计与 events 一致（阶段4 / 2.10）', async () => {
+  // "查了几个词"来自客户端上报的 lookup_start（前端会发；这里补一条模拟真实使用）
+  await call('/api/events', { method: 'POST', profile: profileA, body: { sessionId: SID(), type: 'lookup_start', word: 'run', mode: 'en' } });
   const old = new Date(Date.now() - 11 * 60 * 1000).toISOString();
   userDb.prepare(
     `INSERT INTO events (profile_id, ts, session_id, mode, word, step, type)
@@ -2354,6 +2553,116 @@ test('安全 13：缺音频时给友好提示而不是服务器报错', async ()
     assert.equal(r.data.retry, true);
   } finally {
     process.env.WORDLOCK_DEV = prev;
+  }
+});
+
+test('安全 14：只绑定会话、不提交输入，不能评分（小学 N=1 也必须真实输入一次）', async () => {
+  const sid = SID();
+  const bound = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'brother', mode: 'en' } });
+  assert.equal(bound.status, 200);
+  assert.equal(bound.data.done, false);
+  // 还没 /api/typing → 不能跟读
+  assert.equal((await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'brother', sessionId: sid, mockScore: 95 } })).status, 403);
+  // 真实输入一次之后才可以
+  await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid, typed: 'brother' } });
+  assert.equal((await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'brother', sessionId: sid, mockScore: 95 } })).status, 200);
+});
+
+test('安全 15：初中 N=2，输一次不够、输两次才放行', async () => {
+  const pid = await newProfile('二次输入测试', 'middle');
+  const sid = SID();
+  await call('/api/session', { method: 'POST', profile: pid, body: { sessionId: sid, word: 'moon', mode: 'en' } });
+  await call('/api/typing', { method: 'POST', profile: pid, body: { sessionId: sid, typed: 'moon' } });
+  assert.equal((await call('/api/score', { method: 'POST', profile: pid, body: { word: 'moon', sessionId: sid, mockScore: 95 } })).status, 403);
+  await call('/api/typing', { method: 'POST', profile: pid, body: { sessionId: sid, typed: 'moon' } });
+  assert.equal((await call('/api/score', { method: 'POST', profile: pid, body: { word: 'moon', sessionId: sid, mockScore: 95 } })).status, 200);
+  await dropProfile(pid);
+});
+
+test('安全 16：客户端塞进 typing_count / typing_done / completed 都不算数', async () => {
+  const sid = SID();
+  await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'paper', mode: 'en' } });
+  const r = await call('/api/typing', {
+    method: 'POST', profile: profileA,
+    body: { sessionId: sid, typed: 'WRONG', completed: 99, done: true, typing_done: 1, typingCount: 99 },
+  });
+  assert.equal(r.data.ok, false);
+  const session = userDb.prepare('SELECT typing_count, typing_done FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(profileA, sid);
+  assert.equal(session.typing_count, 0);
+  assert.equal(session.typing_done, 0);
+  // 也没法靠"声明式"字段蒙混过关
+  assert.equal((await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'paper', sessionId: sid, mockScore: 95 } })).status, 403);
+});
+
+test('安全 17【外部评审发现】：快速查看必须先真实输入过一次', async () => {
+  const pid = await newProfile('快速查看门槛测试');
+  await call(`/api/parent/profiles/${pid}/settings`, { method: 'POST', parent: await getParent(), body: { quickPeekPerDay: 5 } });
+  const sid = SID();
+  // 只绑定、一次都没输入 → 快速查看必须被拒（以前这里会直接给释义，等于整本词典免门槛）
+  await call('/api/session', { method: 'POST', profile: pid, body: { sessionId: sid, word: 'quixotic', mode: 'en' } });
+  const tooEarly = await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'quixotic', sessionId: sid } });
+  assert.equal(tooEarly.status, 403);
+  // 声明成中文入口也不行（否则换个 mode 就绕过去了）
+  const sidZh = SID();
+  await call('/api/session', { method: 'POST', profile: pid, body: { sessionId: sidZh, word: 'quixotic', mode: 'zh' } });
+  assert.equal((await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'quixotic', sessionId: sidZh } })).status, 403);
+  // 真实输入一次之后才允许
+  await call('/api/typing', { method: 'POST', profile: pid, body: { sessionId: sid, typed: 'quixotic' } });
+  const ok = await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'quixotic', sessionId: sid } });
+  assert.equal(ok.status, 200);
+  assert.ok(ok.data.lines.length >= 1);
+  await dropProfile(pid);
+});
+
+test('安全 18：同一段录音重复提交不重复计数（M 次必须是 M 遍）', async () => {
+  const pid = await newProfile('重复录音测试', 'middle');
+  const sid = SID();
+  await bindAndType(pid, sid, 'sun'); // 初中：输入 2 次（M 也是 2）
+  const audio = Buffer.alloc(2000, 7).toString('base64');
+  const first = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sun', sessionId: sid, audioBase64: audio, mockScore: 95 } });
+  assert.equal(first.data.passed, true);
+  assert.equal(first.data.passes, 1);
+  // 同一段音频再提交：不计数，提示重念
+  const again = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sun', sessionId: sid, audioBase64: audio, mockScore: 95 } });
+  assert.equal(again.data.error, 'duplicate_audio');
+  assert.equal(userDb.prepare('SELECT read_pass FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(pid, sid).read_pass, 1);
+  // 换一段（新的录音）就可以继续计数
+  const other = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sun', sessionId: sid, audioBase64: Buffer.alloc(2000, 9).toString('base64'), mockScore: 95 } });
+  assert.equal(other.data.passed, true);
+  assert.equal(other.data.passes, 2);
+  await dropProfile(pid);
+});
+
+test('安全 19：评测没配好或配置不当，启动就失败（纯函数）', async () => {
+  const { scorerConfigProblem } = await import('../server/app.js');
+  const KEYS = ['XUNFEI_APP_ID', 'XUNFEI_API_KEY', 'XUNFEI_API_SECRET'];
+  const saved = { SCORER: process.env.SCORER, WORDLOCK_DEV: process.env.WORDLOCK_DEV };
+  for (const k of KEYS) saved[k] = process.env[k];
+  try {
+    process.env.SCORER = 'mock';
+    delete process.env.WORDLOCK_DEV;
+    assert.ok(/mock/.test(scorerConfigProblem())); // 未声明开发模式 → 拒绝启动
+
+    process.env.WORDLOCK_DEV = '1';
+    assert.equal(scorerConfigProblem(), null); // 明确声明开发模式才允许
+
+    process.env.SCORER = 'xunfei';
+    delete process.env.WORDLOCK_DEV;
+    process.env.XUNFEI_APP_ID = 'x';
+    process.env.XUNFEI_API_KEY = '';
+    process.env.XUNFEI_API_SECRET = 'y';
+    assert.ok(/缺/.test(scorerConfigProblem())); // 缺密钥 → 拒绝启动
+
+    process.env.XUNFEI_API_KEY = 'fake-key-for-test';
+    assert.equal(scorerConfigProblem(), null); // 三个都齐了才允许
+  } finally {
+    process.env.SCORER = saved.SCORER;
+    if (saved.WORDLOCK_DEV === undefined) delete process.env.WORDLOCK_DEV;
+    else process.env.WORDLOCK_DEV = saved.WORDLOCK_DEV;
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
   }
 });
 ````

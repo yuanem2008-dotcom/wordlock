@@ -49,26 +49,18 @@ export function createSessionRouter(userDb, getDictDb) {
     const exists = dictDb.prepare('SELECT 1 FROM dict WHERE word_lower = ? LIMIT 1').get(word);
     if (!exists) return res.status(404).json({ error: '词典里没有这个词' });
 
-    // 英文入口：孩子第 1 次输对了，算 1/N（需求 2.1）；中文入口从 0/N 开始（需求 2.6）
-    const counted = mode === 'en' ? 1 : 0;
-    const created = createSession(userDb, profileId, sessionId, { word, mode, counted });
+    // 绑定会话永远从 0 次开始：**任何一次计数都必须经过 /api/typing 的服务端校验**。
+    // （曾经这里会因 mode==='en' 白送 1 次，等于不真打字、只调一次这个接口就能让 N=1 完成。）
+    // 需求 2.1 的"第 1 次输入算 1/N"仍然满足：前端绑定后会把刚输入的字符串交给 /api/typing 校验并计 1。
+    const created = createSession(userDb, profileId, sessionId, { word, mode });
     if (!created.ok) {
       // 同一个会话被换词：拒绝（防「给容易的词过关后改词看释义」）
       return res.status(403).json({ error: '这个会话已经绑定了别的词，请重新开始' });
     }
 
-    let session = created.session;
-    let done = session.typing_done === 1;
-    // 英文入口且 N=1：第 1 次输入就直接进入下一阶段
-    if (mode === 'en' && required <= 1 && !done) {
-      const r = recordTypingSuccess(userDb, profileId, session, required);
-      session = getSession(userDb, profileId, sessionId);
-      done = r.done;
-    }
+    const session = created.session;
+    const done = session.typing_done === 1;
     const completed = Math.min(session.typing_count, required);
-    if (done) logEvent(profileId, sessionId, mode, word, 'typing_done', null);
-    logEvent(profileId, sessionId, mode, word, 'typing_ok', { completed });
-
     res.json({ ok: true, word: session.word, mode: session.mode, completed, requiredCount: required, done });
   });
 

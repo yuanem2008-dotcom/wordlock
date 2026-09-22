@@ -21,6 +21,8 @@ const FILES = [
   'server/scoring-policy.js',
   'server/routes/vocab.js',
   'server/routes/child.js',
+  'server/routes/dict.js',
+  'server/settings.js',
   'server/scorers/xunfei.js',
   'server/scorers/mock.js',
   'server/scorers/index.js',
@@ -51,16 +53,23 @@ const header = `# WordLock —— 安全审阅包（门槛是否可被绕过）
 
 ## 本次修复要守住的不变量
 
-1. 「输入 N 次」由**服务端**判定：\`POST /api/session\` 绑定目标词（服务端查词典确认存在），
-   \`POST /api/typing\` 由服务端比对字符串并累加；客户端上报的进度一概不算数。
+1. 「输入 N 次」由**服务端**判定，**且从 0 开始数**：\`POST /api/session\` 只绑定目标词
+   （服务端查词典确认存在），**不给任何次数**；只有 \`/api/typing\` 里服务端比对通过才算一次。
+   需求 2.1 的"第 1 次输入算 1/N"由前端把刚输入的字符串再交给 \`/api/typing\` 实现，孩子体感不变。
+   客户端上报的 \`count/done/typing_done\` 一律忽略。
 2. 会话**绑定目标词后不可改**（同一 sessionId 换词必须 403）。
 3. 释义放行必须同时满足：**同档案 + 同会话 + \`session.word === 请求的词\`（归一化）+ 输入已完成 +
    （跟读达标 或 求助通关 或 快速查看 或 该词已学会）**。读音同理。
    → 实现见 \`server/sessions.js\` 的 \`sessionUnlocksMeaning()\` / \`sessionUnlocksPronunciation()\`
-4. \`/api/events\` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
-5. 求助通关由服务端判定：\`POST /api/help\` 内部查 \`learn_sessions.read_fail >= helpAfterFails\`。
-6. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
-7. 启动强检查：\`SCORER=mock\` 且没有 \`WORDLOCK_DEV=1\` → 拒绝启动；密钥缺失 → 拒绝启动。
+4. **快速查看只免除"跟读"，不免除"输入"**：\`/api/quick-peek\` 要求 \`session.typing_count >= 1\`，
+   **中英文入口都要求**（否则声明 \`mode='zh'\` 就能绕过）。它直接返回释义、不走 \`/api/meaning\`，
+   所以这条判断必须写在它自己里面。
+5. \`/api/events\` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
+6. 求助通关由服务端判定：\`POST /api/help\` 内部查 \`learn_sessions.read_fail >= helpAfterFails\`。
+7. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
+8. **同一段录音重复提交不重复计数**（\`/api/score\` 的音频指纹），返回 \`duplicate_audio\`。
+9. 启动强检查：\`SCORER=mock\` 且没有 \`WORDLOCK_DEV=1\` → 拒绝启动；密钥缺失 → 拒绝启动
+   （检查在 \`boot()\` 里，任何入口点都绕不过去）。
 
 > ⚠️ 注意：\`server/sessions.js\`（状态层，提供状态函数）与 \`server/routes/session.js\`
 > （HTTP 路由，暴露 \`/api/session\`、\`/api/typing\`）是**两个不同的文件**。
@@ -87,7 +96,7 @@ const header = `# WordLock —— 安全审阅包（门槛是否可被绕过）
 
 ## 测试
 
-仓库共 119 个测试；其中 \`tests/integration.test.js\` 末尾有一组标着「安全 N」的回归用例，
+仓库共 125 个测试（其中 19 个标着「安全 N」）；其中 \`tests/integration.test.js\` 末尾有一组标着「安全 N」的回归用例，
 每一条都对应一个曾经**真实存在且已实测复现**的绕过路径。
 `;
 

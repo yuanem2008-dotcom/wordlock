@@ -126,17 +126,25 @@ test('完整流程：输入 → 读音放行 → 跟读通过 → 释义放行 �
 });
 
 test('输入次数按门槛档位来（小学 1 次、初中 2 次）', async () => {
+  // 绑定会话永远从 0 次开始：任何一次计数都必须经过 /api/typing 的服务端校验
   const sid1 = SID();
   const r1 = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid1, word: 'book', mode: 'en' } });
   assert.equal(r1.data.requiredCount, 1);
-  assert.equal(r1.data.done, true); // N=1：第 1 次输入即完成
+  assert.equal(r1.data.completed, 0);
+  assert.equal(r1.data.done, false);
+  const a1 = await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid1, typed: 'book' } });
+  assert.equal(a1.data.completed, 1);
+  assert.equal(a1.data.done, true); // 小学 N=1：真实输入 1 次即完成
 
   const sid2 = SID();
   const r2 = await call('/api/session', { method: 'POST', profile: profileB, body: { sessionId: sid2, word: 'book', mode: 'en' } });
   assert.equal(r2.data.requiredCount, 2);
   assert.equal(r2.data.done, false);
-  const r3 = await call('/api/typing', { method: 'POST', profile: profileB, body: { sessionId: sid2, typed: 'book' } });
-  assert.equal(r3.data.done, true);
+  const b1 = await call('/api/typing', { method: 'POST', profile: profileB, body: { sessionId: sid2, typed: 'book' } });
+  assert.equal(b1.data.completed, 1);
+  assert.equal(b1.data.done, false); // 初中 N=2：还差一次
+  const b2 = await call('/api/typing', { method: 'POST', profile: profileB, body: { sessionId: sid2, typed: 'book' } });
+  assert.equal(b2.data.done, true);
 });
 
 test('输入错误由服务端指出位置，且不计数', async () => {
@@ -308,6 +316,8 @@ test('家长 PIN：连续输错会被临时锁定', async () => {
 });
 
 test('家长汇总：放弃点统计与 events 一致（阶段4 / 2.10）', async () => {
+  // "查了几个词"来自客户端上报的 lookup_start（前端会发；这里补一条模拟真实使用）
+  await call('/api/events', { method: 'POST', profile: profileA, body: { sessionId: SID(), type: 'lookup_start', word: 'run', mode: 'en' } });
   const old = new Date(Date.now() - 11 * 60 * 1000).toISOString();
   userDb.prepare(
     `INSERT INTO events (profile_id, ts, session_id, mode, word, step, type)
@@ -462,5 +472,115 @@ test('安全 13：缺音频时给友好提示而不是服务器报错', async ()
     assert.equal(r.data.retry, true);
   } finally {
     process.env.WORDLOCK_DEV = prev;
+  }
+});
+
+test('安全 14：只绑定会话、不提交输入，不能评分（小学 N=1 也必须真实输入一次）', async () => {
+  const sid = SID();
+  const bound = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'brother', mode: 'en' } });
+  assert.equal(bound.status, 200);
+  assert.equal(bound.data.done, false);
+  // 还没 /api/typing → 不能跟读
+  assert.equal((await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'brother', sessionId: sid, mockScore: 95 } })).status, 403);
+  // 真实输入一次之后才可以
+  await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid, typed: 'brother' } });
+  assert.equal((await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'brother', sessionId: sid, mockScore: 95 } })).status, 200);
+});
+
+test('安全 15：初中 N=2，输一次不够、输两次才放行', async () => {
+  const pid = await newProfile('二次输入测试', 'middle');
+  const sid = SID();
+  await call('/api/session', { method: 'POST', profile: pid, body: { sessionId: sid, word: 'moon', mode: 'en' } });
+  await call('/api/typing', { method: 'POST', profile: pid, body: { sessionId: sid, typed: 'moon' } });
+  assert.equal((await call('/api/score', { method: 'POST', profile: pid, body: { word: 'moon', sessionId: sid, mockScore: 95 } })).status, 403);
+  await call('/api/typing', { method: 'POST', profile: pid, body: { sessionId: sid, typed: 'moon' } });
+  assert.equal((await call('/api/score', { method: 'POST', profile: pid, body: { word: 'moon', sessionId: sid, mockScore: 95 } })).status, 200);
+  await dropProfile(pid);
+});
+
+test('安全 16：客户端塞进 typing_count / typing_done / completed 都不算数', async () => {
+  const sid = SID();
+  await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'paper', mode: 'en' } });
+  const r = await call('/api/typing', {
+    method: 'POST', profile: profileA,
+    body: { sessionId: sid, typed: 'WRONG', completed: 99, done: true, typing_done: 1, typingCount: 99 },
+  });
+  assert.equal(r.data.ok, false);
+  const session = userDb.prepare('SELECT typing_count, typing_done FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(profileA, sid);
+  assert.equal(session.typing_count, 0);
+  assert.equal(session.typing_done, 0);
+  // 也没法靠"声明式"字段蒙混过关
+  assert.equal((await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'paper', sessionId: sid, mockScore: 95 } })).status, 403);
+});
+
+test('安全 17【外部评审发现】：快速查看必须先真实输入过一次', async () => {
+  const pid = await newProfile('快速查看门槛测试');
+  await call(`/api/parent/profiles/${pid}/settings`, { method: 'POST', parent: await getParent(), body: { quickPeekPerDay: 5 } });
+  const sid = SID();
+  // 只绑定、一次都没输入 → 快速查看必须被拒（以前这里会直接给释义，等于整本词典免门槛）
+  await call('/api/session', { method: 'POST', profile: pid, body: { sessionId: sid, word: 'quixotic', mode: 'en' } });
+  const tooEarly = await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'quixotic', sessionId: sid } });
+  assert.equal(tooEarly.status, 403);
+  // 声明成中文入口也不行（否则换个 mode 就绕过去了）
+  const sidZh = SID();
+  await call('/api/session', { method: 'POST', profile: pid, body: { sessionId: sidZh, word: 'quixotic', mode: 'zh' } });
+  assert.equal((await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'quixotic', sessionId: sidZh } })).status, 403);
+  // 真实输入一次之后才允许
+  await call('/api/typing', { method: 'POST', profile: pid, body: { sessionId: sid, typed: 'quixotic' } });
+  const ok = await call('/api/quick-peek', { method: 'POST', profile: pid, body: { word: 'quixotic', sessionId: sid } });
+  assert.equal(ok.status, 200);
+  assert.ok(ok.data.lines.length >= 1);
+  await dropProfile(pid);
+});
+
+test('安全 18：同一段录音重复提交不重复计数（M 次必须是 M 遍）', async () => {
+  const pid = await newProfile('重复录音测试', 'middle');
+  const sid = SID();
+  await bindAndType(pid, sid, 'sun'); // 初中：输入 2 次（M 也是 2）
+  const audio = Buffer.alloc(2000, 7).toString('base64');
+  const first = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sun', sessionId: sid, audioBase64: audio, mockScore: 95 } });
+  assert.equal(first.data.passed, true);
+  assert.equal(first.data.passes, 1);
+  // 同一段音频再提交：不计数，提示重念
+  const again = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sun', sessionId: sid, audioBase64: audio, mockScore: 95 } });
+  assert.equal(again.data.error, 'duplicate_audio');
+  assert.equal(userDb.prepare('SELECT read_pass FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(pid, sid).read_pass, 1);
+  // 换一段（新的录音）就可以继续计数
+  const other = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sun', sessionId: sid, audioBase64: Buffer.alloc(2000, 9).toString('base64'), mockScore: 95 } });
+  assert.equal(other.data.passed, true);
+  assert.equal(other.data.passes, 2);
+  await dropProfile(pid);
+});
+
+test('安全 19：评测没配好或配置不当，启动就失败（纯函数）', async () => {
+  const { scorerConfigProblem } = await import('../server/app.js');
+  const KEYS = ['XUNFEI_APP_ID', 'XUNFEI_API_KEY', 'XUNFEI_API_SECRET'];
+  const saved = { SCORER: process.env.SCORER, WORDLOCK_DEV: process.env.WORDLOCK_DEV };
+  for (const k of KEYS) saved[k] = process.env[k];
+  try {
+    process.env.SCORER = 'mock';
+    delete process.env.WORDLOCK_DEV;
+    assert.ok(/mock/.test(scorerConfigProblem())); // 未声明开发模式 → 拒绝启动
+
+    process.env.WORDLOCK_DEV = '1';
+    assert.equal(scorerConfigProblem(), null); // 明确声明开发模式才允许
+
+    process.env.SCORER = 'xunfei';
+    delete process.env.WORDLOCK_DEV;
+    process.env.XUNFEI_APP_ID = 'x';
+    process.env.XUNFEI_API_KEY = '';
+    process.env.XUNFEI_API_SECRET = 'y';
+    assert.ok(/缺/.test(scorerConfigProblem())); // 缺密钥 → 拒绝启动
+
+    process.env.XUNFEI_API_KEY = 'fake-key-for-test';
+    assert.equal(scorerConfigProblem(), null); // 三个都齐了才允许
+  } finally {
+    process.env.SCORER = saved.SCORER;
+    if (saved.WORDLOCK_DEV === undefined) delete process.env.WORDLOCK_DEV;
+    else process.env.WORDLOCK_DEV = saved.WORDLOCK_DEV;
+    for (const k of KEYS) {
+      if (saved[k] === undefined) delete process.env[k];
+      else process.env[k] = saved[k];
+    }
   }
 });

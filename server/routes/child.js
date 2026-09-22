@@ -57,6 +57,12 @@ export function createChildRouter(userDb, getDictDb) {
     if (!session || session.word !== word) {
       return res.status(403).json({ error: '这个会话不对应这个词，请重新开始' });
     }
+    // 必须先至少真实输入过一次（服务端校验过的），否则等于"连一个字母都不用打就能看释义"。
+    // 需求阶段5 把按钮放在"第 1 次输入成功后"，所以门槛就是 ≥1 次真实输入；
+    // 中英文入口都要求，否则孩子只要声明 mode='zh' 就能绕过。
+    if (session.typing_count < 1) {
+      return res.status(403).json({ error: '要先把这个词输入一遍才能快速查看哦' });
+    }
 
     // pending 的词不覆盖已学会的（需求 2.8 / 阶段5）
     const existing = getVocabWord(userDb, profileId, word);

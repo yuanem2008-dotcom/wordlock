@@ -355,18 +355,9 @@ async function firstLookup(word, raw) {
   state.learn = { word: dictResult.word, entryMode: 'en', consolidate: false };
   const bound = await bindSession(dictResult.word, 'en');
   if (!bound) return;
-  maybeShowPeek();
-  if (bound.done) {
-    renderProgress(bound.completed);
-    showFeedback('输入完成！', true);
-    playSuccessSound(soundOn());
-    openPronunciation();
-  } else {
-    renderProgress(bound.completed);
-    showFeedback(CHEERS[state.cheerIndex++ % CHEERS.length], true);
-    playStepSound(soundOn());
-    $('input-word').focus();
-  }
+  // 第 1 次输入同样要过服务端校验并计数（需求 2.1：第 1 次输入算 1/N）。
+  // 服务端不再因为"绑定会话"就白送一次，所以这里必须把这串真实的输入交给 /api/typing。
+  await submitTyping(raw);
 }
 
 // 后续每次输入：由服务端比对与计数（客户端说的不算数）
@@ -386,11 +377,14 @@ async function submitTyping(raw) {
   if (r.ok) {
     if (r.done) {
       renderProgress(r.completed);
+      $('btn-quick-peek').hidden = true; // 已经进门槛了，不需要"快速查看"
       showFeedback('输入完成！', true);
       playSuccessSound(soundOn());
       openPronunciation();
     } else {
       renderProgress(r.completed);
+      // 真正输入过一次之后才给"快速查看"（服务端也这么要求）
+      if (r.completed >= 1) maybeShowPeek();
       showFeedback(CHEERS[state.cheerIndex++ % CHEERS.length], true);
       playStepSound(soundOn());
       $('input-word').focus();
@@ -493,7 +487,7 @@ function pickCandidate(item) {
   hideFeedback();
   hideSuggestions();
   renderProgress(0);
-  maybeShowPeek();
+  $('btn-quick-peek').hidden = true; // 输入过一次之后才出现（见 submitTyping）
   showView('view-main');
   $('input-word').focus();
   // 中文入口从 0/N 开始，由服务端绑定目标词（服务端自己查词典确认存在）

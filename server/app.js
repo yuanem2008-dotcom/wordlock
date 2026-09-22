@@ -68,24 +68,25 @@ export function createApp({ userDb, dictDb }) {
 }
 
 export function boot() {
+  // 评测没配好就**拒绝启动**（放在 boot 里，任何入口点都绕不过去）
+  const problem = scorerConfigProblem();
+  if (problem) throw new Error(problem);
+
   const userDb = openUserDb();
   const dictDb = openDictDb();
   if (!dictDb) {
     console.warn('提示：还没有找到 data/dict.db，查词功能暂不可用。请先下载词典并运行 npm run build-dict（见 README）。');
   }
+
   const scorerName = (process.env.SCORER || 'mock').toLowerCase();
+  const dev = (process.env.WORDLOCK_DEV ?? '') === '1';
   if (scorerName === 'mock') {
-    console.log('评测：模拟打分（正式用请在 .env 里设置 SCORER=xunfei 并填好密钥）');
-  } else {
-    const missing =
-      scorerName === 'xunfei'
-        ? ['XUNFEI_APP_ID', 'XUNFEI_API_KEY', 'XUNFEI_API_SECRET'].filter((k) => !process.env[k])
-        : ['TENCENT_SECRET_ID', 'TENCENT_SECRET_KEY'].filter((k) => !process.env[k]);
-    console.log(
-      missing.length
-        ? `评测：${scorerName}（还没配置好，缺 ${missing.join('、')}）`
-        : `评测：${scorerName}（已配置）`
+    console.warn(
+      '\n⚠️  开发模式：评测用的是"模拟打分"，孩子说什么都会过，绝对不能这样给孩子用。\n' +
+        '   正式使用请把 .env 里的 SCORER 改成 xunfei 并删掉 WORDLOCK_DEV。\n'
     );
+  } else {
+    console.log(`评测：${scorerName}（已配置）${dev ? '，⚠️ 但开着开发模式开关 WORDLOCK_DEV' : ''}`);
   }
   return { userDb, dictDb, app: createApp({ userDb, dictDb }) };
 }

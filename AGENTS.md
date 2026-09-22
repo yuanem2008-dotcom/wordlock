@@ -39,7 +39,7 @@
 | `public/app.js` | 界面与流程编排（单文件，较长） |
 | `public/tts.js`、`audio-record.js` | 标准读音（男性嗓音优先级）、录音并转 16k/16bit/单声道 WAV |
 | `scripts/build-dict.js` | ECDICT → `dict.db`（含中文反查索引 `zh_index`） |
-| `tests/` | `node:test` 共 119 个（含 13 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
+| `tests/` | `node:test` 共 125 个（含 19 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
 
 ## 不能改坏的硬约束（都是联调/踩坑换来的，改动请连带跑测试）
 
@@ -53,18 +53,26 @@
 
 ### 门槛不可绕过（这七条是核心不变量，改动务必跑安全回归测试）
 
-1. **「输入 N 次」由服务端判定**：`POST /api/session` 绑定目标词（服务端自己查词典确认存在），
-   `POST /api/typing` 由服务端比对字符串并累加。客户端上报的进度一概不算数。
+1. **「输入 N 次」由服务端判定，且从 0 开始数**：`POST /api/session` 只负责绑定目标词
+   （服务端自己查词典确认存在），**不给任何次数**；只有 `POST /api/typing` 里服务端比对通过才算一次。
+   需求 2.1 的"第 1 次输入算 1/N"由前端把刚输入的字符串再交给 `/api/typing` 实现，孩子体感不变。
+   客户端上报的任何 `count/done/typing_done` 字段一概忽略。
 2. **会话绑定目标词且创建后不可改**：同一 `sessionId` 换词必须 403（否则「给容易的词过关 → 改词 → 看释义」）。
 3. **释义必须同时满足**：同档案 + 同会话 + `session.word === 请求的词`（归一化后）+ 输入已完成 +
    （跟读达标 或 求助通关 或 快速查看 或 该词已学会）。见 `sessions.js` 的 `sessionUnlocksMeaning()`。
 4. **读音同理**：`sessionUnlocksPronunciation()`。
-5. **`/api/events` 只记录、绝不授权**：它接收前端上报，所以不能改变任何放行状态；
+5. **快速查看只免除"跟读"，不免除"输入"**：`/api/quick-peek` 要求 `session.typing_count >= 1`
+   （**中英文入口都要求**，否则孩子声明 `mode='zh'` 就能绕过）。它直接返回释义、不走 `/api/meaning`，
+   所以这条判断必须写在它自己里面。
+6. **`/api/events` 只记录、绝不授权**：它接收前端上报，所以不能改变任何放行状态；
    只接受不涉及放行的类型（`lookup_start` / `not_found` / `cancel` / `network_error`）。
-6. **求助通关由服务端判定**：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`，否则 403。
-7. **校准分数线只由服务端算**：`/api/calibration/start` 清样本、`/api/score` 带 `calibration:true` 时
+7. **求助通关由服务端判定**：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`，否则 403。
+8. **校准分数线只由服务端算**：`/api/calibration/start` 清样本、`/api/score` 带 `calibration:true` 时
    由服务端把分数写进 `calibration_samples`、`/api/calibration/finish` 由服务端算平均分
    （有效样本 < 2 个则保留原分数线）。客户端提交的任何分数一律忽略。
+9. **同一段录音重复提交不重复计数**：产品的 M 次是"读 M 遍"，不是"同一遍提交 M 次"。
+   `/api/score` 用音频指纹（内存 Map，进程内，只记最近几段）拦住重复回放，返回
+   `duplicate_audio`（不计入失败、提示重念）。
 
 另外：**启动即强检查**——`SCORER=mock` 且没有显式 `WORDLOCK_DEV=1` 时拒绝启动；
 选了 `xunfei`/`tencent` 但密钥缺失也拒绝启动（避免静默变成"随便念都能过"）。
@@ -74,15 +82,17 @@
 ```bash
 npm start              # HTTP（电脑上用；本会话沙箱内不能监听端口）
 npm run start:https    # HTTPS（iPad 用麦克风时需要，先 npm run certs）
-npm test               # 119 个测试（单元 + 进程内集成 + 安全回归）
+npm test               # 125 个测试（单元 + 进程内集成 + 安全回归）
 npm run build-dict     # 由 data/raw 的 ECDICT 重建 data/dict.db（约 35 秒）
 npm run try-scorer     # 用 macOS say 合成人声送真实评测，验证密钥与计分是否正常
-npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（单文件源码快照，供外部 AI 审阅）
+npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（全量源码快照，供外部 AI 审阅）
+npm run security-pack  # 重新生成 docs/SECURITY-REVIEW.md（只含安全相关文件，约 100KB，便于抓取）
 npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时用，需 .github-token）
 ```
 
-> **只读一个文件就能拿到全部源码**：`docs/REVIEW-PACK.md`（自包含快照，含背景说明与
-> 全部源码）。抓取 GitHub 目录页失败时，直接读这个文件即可，不必逐个找源文件。
+> **外部 AI 审阅用哪个**：优先 `docs/SECURITY-REVIEW.md`（小、专为安全审阅抽取）。
+> `docs/REVIEW-PACK.md` 是全量包（320KB+），外部抓取工具容易在中间被截断——
+> 顺序是 server → public → scripts → tests，所以大文件 `scripts/build-dict.js` 之前的内容才读得到。
 
 ## 欢迎重点审阅的地方
 

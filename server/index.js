@@ -7,18 +7,19 @@ import path from 'node:path';
 import https from 'node:https';
 import { fileURLToPath } from 'node:url';
 import { loadEnv } from './env.js';
-import { boot, scorerConfigProblem } from './app.js';
+import { boot } from './app.js';
 
 loadEnv();
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// 评测没配好就别启动（避免静默变成"随便念都能过"）
-const problem = scorerConfigProblem();
-if (problem) {
-  console.error(`\n启动失败：${problem}\n`);
+// 评测没配好就别启动（检查在 boot() 里，任何入口点都绕不过去）
+let app;
+try {
+  ({ app } = boot());
+} catch (err) {
+  console.error(`\n启动失败：${err.message}\n`);
   process.exit(1);
 }
-const { app } = boot();
 
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';

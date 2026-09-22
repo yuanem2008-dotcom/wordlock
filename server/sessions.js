@@ -20,7 +20,7 @@ export function getSession(userDb, profileId, sessionId) {
 // 建立会话并绑定目标词。同一个 (档案, 会话) 若已存在：
 //   - 词相同 → 原样返回（幂等）
 //   - 词不同 → 拒绝（这是防止「给容易的词过关 → 改成生僻词 → 看释义」的关键）
-export function createSession(userDb, profileId, sessionId, { word, mode = 'en', counted = 0 }) {
+export function createSession(userDb, profileId, sessionId, { word, mode = 'en' }) {
   const id = SID(sessionId);
   const target = String(word ?? '').trim().toLowerCase().slice(0, 64);
   if (!id || !target) return { ok: false, reason: 'bad_request' };
@@ -38,8 +38,8 @@ export function createSession(userDb, profileId, sessionId, { word, mode = 'en',
          (profile_id, session_id, word, mode, typing_count, typing_done, created_at, updated_at)
        VALUES (?, ?, ?, ?, ?, 0, ?, ?)`
     )
-    .run(profileId, id, target, mode === 'zh' ? 'zh' : 'en', Math.max(0, counted), now, now);
-  return { ok: true, session: getSession(userDb, profileId, id), completed: Math.max(0, counted) };
+    .run(profileId, id, target, mode === 'zh' ? 'zh' : 'en', 0, now, now);
+  return { ok: true, session: getSession(userDb, profileId, id), completed: 0 };
 }
 
 function update(userDb, profileId, sessionId, sets, args) {

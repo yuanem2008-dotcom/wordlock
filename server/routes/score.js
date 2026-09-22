@@ -7,6 +7,7 @@
 //   - 校准分数线由**服务端**根据自己记录的分数算，不接受客户端上报的分数。
 
 import { Router } from 'express';
+import crypto from 'node:crypto';
 import { getScorer, scorerIsConfigured } from '../scorers/index.js';
 import { decideOutcome } from '../scoring-policy.js';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
@@ -16,6 +17,21 @@ import { graduateWord } from '../vocab.js';
 const MAX_AUDIO_BYTES = 4 * 1024 * 1024;
 const CALIBRATION_MIN_SAMPLES = 2;
 const CALIBRATION_CLAMP = [50, 75];
+
+// 防"回放同一段录音"：产品的 M 次本意是"读 M 遍"，不是"同一遍提交 M 次"。
+// 同一个会话里重复提交字节完全相同的音频不重复计数（只记最近几段，避免内存增长；
+// 进程重启后重新计数 —— 这只影响"同一秒内反复回放"的场景，不影响正常使用）。
+const audioFingerprints = new Map();
+function isRepeatedAudio(profileId, sessionId, buffer) {
+  const key = `${profileId}:${sessionId}`;
+  const hash = crypto.createHash('sha1').update(buffer).digest('hex');
+  const seen = audioFingerprints.get(key) ?? new Set();
+  if (seen.has(hash)) return true;
+  seen.add(hash);
+  if (seen.size > 8) seen.clear();
+  audioFingerprints.set(key, seen);
+  return false;
+}
 
 const normalize = (s) => String(s ?? '').trim().toLowerCase();
 
@@ -105,6 +121,18 @@ export function createScoreRouter(userDb) {
     if (outcome.kind === 'error') {
       console.warn(`[评测] ${scorer.name} 失败：${result.error}`);
       return res.json({ score: null, passed: false, error: result.error || 'scorer_error', message: outcome.message });
+    }
+
+    // 重复提交同一段录音 → 不计入通过次数（也不算失败，提示重念）
+    if (outcome.passed && buffer && isRepeatedAudio(profileId, sessionId, buffer)) {
+      return res.json({
+        score: null,
+        passed: false,
+        error: 'duplicate_audio',
+        message: '这段录音和刚才一样，再念一遍吧',
+        retry: true,
+        canHelp: session.read_fail >= bundle.settings.helpAfterFails,
+      });
     }
 
     // 只有真正跑完一次评测（通过或没通过）才计入状态
