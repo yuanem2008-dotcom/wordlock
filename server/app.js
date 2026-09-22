@@ -41,7 +41,14 @@ export function scorerConfigProblem() {
 export function createApp({ userDb, dictDb }) {
   const app = express();
   app.use(express.json({ limit: '8mb' }));
-  app.use(express.static(path.join(__dirname, '..', 'public')));
+  // 静态文件带 no-store：否则 Cloudflare 会给 .js/.css 套上 4 小时的边缘缓存，
+  // 出现「服务器代码已更新、孩子那边还在跑旧版本」的怪现象（实测踩过：改了校验规则，
+  // iPad 上仍然报旧提示）。这个应用很小，每次重新取一遍毫无压力。
+  app.use(
+    express.static(path.join(__dirname, '..', 'public'), {
+      setHeaders: (res) => res.setHeader('Cache-Control', 'no-store'),
+    })
+  );
 
   const requireProfile = createProfileMiddleware(userDb);
   app.use('/api', createProfileRouter(userDb, requireProfile));
