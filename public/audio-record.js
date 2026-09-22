@@ -36,11 +36,9 @@ export function createRecorder() {
     stream = await navigator.mediaDevices.getUserMedia({
       audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
     });
-    try {
-      ctx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: TARGET_RATE });
-    } catch {
-      ctx = new (window.AudioContext || window.webkitAudioContext)();
-    }
+    // ⚠️ 故意不指定 sampleRate：Safari 上「指定非默认采样率的 AudioContext + 麦克风」
+    // 已知会输出纯零（采不到声音）。这里用默认采样率采集，stop() 时再重采样到 16k。
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
     if (ctx.state === 'suspended') await ctx.resume();
     const source = ctx.createMediaStreamSource(stream);
     running = true;

@@ -128,6 +128,7 @@ export function createScoreRouter(userDb) {
     /* ---- 正常跟读 ---- */
     const outcome = decideOutcome(result, passScore);
     if (outcome.kind === 'retry') {
+      console.warn(`[评测] retry：${result.error} detail=${JSON.stringify(result.detail ?? null)}`);
       return res.json({
         score: null,
         passed: false,

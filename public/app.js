@@ -7,7 +7,7 @@ import {
   MSG_INVALID,
   MSG_LENGTH,
   positionMessage,
-} from './state-machine.js?v=20260922b';
+} from './state-machine.js?v=20260922c';
 import { unlockTTS, speakWord, listEnglishVoices } from './tts.js?v=20260922b';
 import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js?v=20260922b';
 import { createRecorder } from './audio-record.js?v=20260922b';
@@ -722,8 +722,9 @@ async function submitScore(extra = {}) {
     if (res.error) {
       showFeedback(res.message || '评测没成功，再试一次', false, 'feedback-reading');
       if (!state.calibration) state.reading.recordError();
-      if (res.error === 'scorer_error' || res.error === 'not_configured') {
-        logEvents([{ type: 'network_error', word, detail: { error: res.error } }], { step: 'reading' });
+      if (res.error !== 'too_quiet') {
+        logEvents([{ type: res.error === 'no_speech' || res.error === 'bad_audio' ? 'read_retry' : 'network_error',
+                     word, detail: { error: res.error, score: res.score ?? null } }], { step: 'reading' });
       }
       return;
     }
