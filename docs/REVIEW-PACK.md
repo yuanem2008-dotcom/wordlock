@@ -87,7 +87,7 @@
 | `public/app.js` | 界面与流程编排（单文件，较长） |
 | `public/tts.js`、`audio-record.js` | 标准读音（男性嗓音优先级）、录音并转 16k/16bit/单声道 WAV |
 | `scripts/build-dict.js` | ECDICT → `dict.db`（含中文反查索引 `zh_index`） |
-| `tests/` | `node:test` 共 132 个（含 22 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
+| `tests/` | `node:test` 共 134 个（含 22 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
 
 ## 不能改坏的硬约束（都是联调/踩坑换来的，改动请连带跑测试）
 
@@ -138,7 +138,7 @@
 ```bash
 npm start              # HTTP（电脑上用；本会话沙箱内不能监听端口）
 npm run start:https    # HTTPS（iPad 用麦克风时需要，先 npm run certs）
-npm test               # 132 个测试（单元 + 进程内集成 + 安全回归）
+npm test               # 134 个测试（单元 + 进程内集成 + 安全回归）
 npm run build-dict     # 由 data/raw 的 ECDICT 重建 data/dict.db（约 35 秒）
 npm run try-scorer     # 用 macOS say 合成人声送真实评测，验证密钥与计分是否正常
 npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（全量源码快照，供外部 AI 审阅）
@@ -158,7 +158,7 @@ npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时�
    **门槛与计分还有没有漏洞——孩子能不能绕过？**（这是本项目的核心不变量，
    `tests/integration.test.js` 末尾那 22 个"安全 N"用例就是它的看门狗）
 3. `public/state-machine.js`：换词重置、中文入口、待巩固流程的边界情况。
-4. `server/vocab.js`：复习调度（间隔 [1,2,7]、求助通关额外一轮、毕业后不再推送）、日期边界。
+4. `server/vocab.js`：复习调度（间隔 [1,2,7,15,30]、求助通关额外一轮、毕业后不再推送）、日期边界。
 5. `server/routes/parent.js` 的"每周汇总 / 放弃点判定"（需求 2.10：未到 `meaning_shown` 且 10 分钟无新事件即视为放弃）。
 6. 数据量与性能：词典 337 万词条、中文索引 270 万行，`zh_index` 的 `rank/hot` 分档与查询计划。
 
@@ -238,7 +238,7 @@ cd ~/Desktop/word-lock && npm start
 
 浏览器打开 **http://localhost:3000**。想换端口：`PORT=3001 npm start`。
 
-5. 跑测试：`npm test`（共 132 个测试：单元测试 + 接口集成测试，含 22 个"门槛不可绕过"的安全回归）。
+5. 跑测试：`npm test`（共 134 个测试：单元测试 + 接口集成测试，含 22 个"门槛不可绕过"的安全回归）。
 
 ## 二、功能总览（按使用场景）
 
@@ -255,7 +255,7 @@ cd ~/Desktop/word-lock && npm start
 - **已学会的词免门槛**：学过的词再查，直接看释义和听读音，并显示"这个词你 X 天前学过啦"。
 
 ### 复习
-- 通关的词进**生词本**，按第 1、2、7 天的间隔安排复习（求助通关的词多一轮）；每天最多推送设定数量的词（默认 3 或 5）。
+- 通关的词进**生词本**，按第 1、2、7、15、30 天的间隔安排复习（比原来拉长，避免一个月后全忘）（求助通关的词多一轮）；每天最多推送设定数量的词（默认 3 或 5）。
 - 复习题是"看中文释义 → 输入英文"，答对进入下一间隔，答错显示正确答案、退回上一阶段、第二天再考。复习毕业的词不再推送。**没有任何断签清零。**
 - 主界面上方显示"今天有 N 个词要复习""待巩固 N 个"，都不强制。
 
@@ -4392,7 +4392,7 @@ const header = `# WordLock —— 安全审阅包（门槛是否可被绕过）
 
 ## 测试
 
-仓库共 132 个测试（其中 22 个标着「安全 N」）；其中 \`tests/integration.test.js\` 末尾有一组标着「安全 N」的回归用例，
+仓库共 134 个测试（其中 22 个标着「安全 N」）；其中 \`tests/integration.test.js\` 末尾有一组标着「安全 N」的回归用例，
 每一条都对应一个曾经**真实存在且已实测复现**的绕过路径。
 `;
 
