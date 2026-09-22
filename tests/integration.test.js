@@ -552,7 +552,67 @@ test('安全 18：同一段录音重复提交不重复计数（M 次必须是 M 
   await dropProfile(pid);
 });
 
-test('安全 19：评测没配好或配置不当，启动就失败（纯函数）', async () => {
+test('安全 19：重复提交"没通过"的录音，也不会重复累计失败次数', async () => {
+  const pid = await newProfile('重复失败录音测试');
+  const sid = SID();
+  await bindAndType(pid, sid, 'happy');
+  const bad = Buffer.alloc(2000, 3).toString('base64');
+  // 同一段低分录音提交 4 次：只算 1 次失败（否则回放就能刷够"求助通关"）
+  for (let i = 0; i < 4; i++) {
+    const r = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'happy', sessionId: sid, audioBase64: bad, mockScore: 5 } });
+    assert.equal(r.status, 200);
+    if (i > 0) assert.equal(r.data.error, 'duplicate_audio');
+  }
+  const row = userDb.prepare('SELECT read_fail FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(pid, sid);
+  assert.equal(row.read_fail, 1);
+  // 因此也拿不到求助通关
+  assert.equal((await call('/api/help', { method: 'POST', profile: pid, body: { word: 'happy', sessionId: sid } })).status, 403);
+  await dropProfile(pid);
+});
+
+test('安全 20：指纹记满后是"丢最早的"，不是全清（否则交够 N 段就能重放最早那段）', async () => {
+  const pid = await newProfile('指纹淘汰测试', 'middle');
+  const sid = SID();
+  await bindAndType(pid, sid, 'friend');
+  const oldest = Buffer.alloc(2000, 11).toString('base64');
+  const first = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'friend', sessionId: sid, audioBase64: oldest, mockScore: 95 } });
+  assert.equal(first.data.passed, true);
+  // 再交 70 段各不相同的录音（远超每个会话 64 个指纹的上限）
+  for (let i = 0; i < 70; i++) {
+    const audio = Buffer.alloc(1200 + i, i % 251).toString('base64');
+    await call('/api/score', { method: 'POST', profile: pid, body: { word: 'friend', sessionId: sid, audioBase64: audio, mockScore: 95 } });
+  }
+  // 最近的那段仍然被记得 → 证明是"先进先出地丢最早的"，而不是"记满就全清"
+  const recent = Buffer.alloc(1200 + 69, 69 % 251).toString('base64');
+  const again = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'friend', sessionId: sid, audioBase64: recent, mockScore: 95 } });
+  assert.equal(again.data.error, 'duplicate_audio');
+  // 最早那段因为超出上限被淘汰（这是有意为之：内存必须有界）——它会被当成一段新录音
+  const oldestAgain = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'friend', sessionId: sid, audioBase64: oldest, mockScore: 95 } });
+  assert.notEqual(oldestAgain.data.error, 'duplicate_audio');
+  await dropProfile(pid);
+});
+
+test('安全 21：判重不会误伤正常使用——换一段新录音照常计数，且重复时不计入失败', async () => {
+  const pid = await newProfile('判重不误伤测试', 'middle');
+  const sid = SID();
+  await bindAndType(pid, sid, 'sister');
+  const a = Buffer.alloc(1500, 21).toString('base64');
+  const b = Buffer.alloc(1500, 22).toString('base64');
+  const r1 = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sister', sessionId: sid, audioBase64: a, mockScore: 95 } });
+  assert.equal(r1.data.passes, 1);
+  const dup = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sister', sessionId: sid, audioBase64: a, mockScore: 95 } });
+  assert.equal(dup.data.error, 'duplicate_audio');
+  assert.equal(dup.data.retry, true); // 提示重念，不算失败
+  const r2 = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sister', sessionId: sid, audioBase64: b, mockScore: 95 } });
+  assert.equal(r2.data.passed, true);
+  assert.equal(r2.data.passes, 2); // 新录音照常计数
+  const row = userDb.prepare('SELECT read_pass, read_fail FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(pid, sid);
+  assert.equal(row.read_pass, 2);
+  assert.equal(row.read_fail, 0); // 判重没有被算成失败
+  await dropProfile(pid);
+});
+
+test('安全 22：评测没配好或配置不当，启动就失败（纯函数）', async () => {
   const { scorerConfigProblem } = await import('../server/app.js');
   const KEYS = ['XUNFEI_APP_ID', 'XUNFEI_API_KEY', 'XUNFEI_API_SECRET'];
   const saved = { SCORER: process.env.SCORER, WORDLOCK_DEV: process.env.WORDLOCK_DEV };

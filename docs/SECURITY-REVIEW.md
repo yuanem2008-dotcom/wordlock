@@ -27,6 +27,8 @@
 6. 求助通关由服务端判定：`POST /api/help` 内部查 `learn_sessions.read_fail >= helpAfterFails`。
 7. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
 8. **同一段录音重复提交不重复计数**（`/api/score` 的音频指纹），返回 `duplicate_audio`。
+   注意两个易错点：判重对**通过和失败都生效**（否则回放失败的录音可刷够 read_fail 白拿求助通关）；
+   指纹记满是**先进先出丢最早的**，不是 clear() 全清（否则交够若干段就能重放最早那段）。
 9. 启动强检查：`SCORER=mock` 且没有 `WORDLOCK_DEV=1` → 拒绝启动；密钥缺失 → 拒绝启动
    （检查在 `boot()` 里，任何入口点都绕不过去）。
 
@@ -55,7 +57,7 @@
 
 ## 测试
 
-仓库共 125 个测试（其中 19 个标着「安全 N」）；其中 `tests/integration.test.js` 末尾有一组标着「安全 N」的回归用例，
+仓库共 128 个测试（其中 22 个标着「安全 N」）；其中 `tests/integration.test.js` 末尾有一组标着「安全 N」的回归用例，
 每一条都对应一个曾经**真实存在且已实测复现**的绕过路径。
 
 
@@ -382,17 +384,36 @@ const CALIBRATION_MIN_SAMPLES = 2;
 const CALIBRATION_CLAMP = [50, 75];
 
 // 防"回放同一段录音"：产品的 M 次本意是"读 M 遍"，不是"同一遍提交 M 次"。
-// 同一个会话里重复提交字节完全相同的音频不重复计数（只记最近几段，避免内存增长；
-// 进程重启后重新计数 —— 这只影响"同一秒内反复回放"的场景，不影响正常使用）。
-const audioFingerprints = new Map();
+// 同一个会话里重复提交字节完全相同的音频不重复计入（通过和没通过都不重复计）。
+//
+// 两个容易写错的地方，别再改回去：
+//   1. 记满之后必须**先进先出地丢掉最早的**，不能 `clear()` 全清 ——
+//      全清等于"交够 N 段不同的录音，最早那段就被忘掉、可以再重放一次"。
+//   2. 判重必须对**通过和失败都生效**，不能只在通过时判 ——
+//      否则回放一段"没通过"的录音可以刷够 read_fail，白拿"求助通关"。
+//
+// 内存有两层上限：每个会话最多记 MAX_PER_SESSION 个指纹（超出丢最早的），
+// 最多记 MAX_SESSIONS 个会话（超出丢最早进表的）；进程重启即清空。
+const MAX_FINGERPRINTS_PER_SESSION = 64;
+const MAX_SESSIONS = 200;
+const audioFingerprints = new Map(); // key → string[]（按时间顺序）
+
 function isRepeatedAudio(profileId, sessionId, buffer) {
   const key = `${profileId}:${sessionId}`;
   const hash = crypto.createHash('sha1').update(buffer).digest('hex');
-  const seen = audioFingerprints.get(key) ?? new Set();
-  if (seen.has(hash)) return true;
-  seen.add(hash);
-  if (seen.size > 8) seen.clear();
-  audioFingerprints.set(key, seen);
+
+  let seen = audioFingerprints.get(key);
+  if (!seen) {
+    seen = [];
+    audioFingerprints.set(key, seen);
+    if (audioFingerprints.size > MAX_SESSIONS) {
+      // Map 保持插入顺序：删掉最早进入的那个会话
+      audioFingerprints.delete(audioFingerprints.keys().next().value);
+    }
+  }
+  if (seen.includes(hash)) return true;
+  seen.push(hash);
+  if (seen.length > MAX_FINGERPRINTS_PER_SESSION) seen.shift();
   return false;
 }
 
@@ -486,8 +507,9 @@ export function createScoreRouter(userDb) {
       return res.json({ score: null, passed: false, error: result.error || 'scorer_error', message: outcome.message });
     }
 
-    // 重复提交同一段录音 → 不计入通过次数（也不算失败，提示重念）
-    if (outcome.passed && buffer && isRepeatedAudio(profileId, sessionId, buffer)) {
+    // 重复提交同一段录音 → 通过和没通过都不重复计入（提示重念，不算失败）
+    // 只在"通过"时判重是不够的：回放一段没通过的录音可以刷够 read_fail，白拿求助通关。
+    if (buffer && isRepeatedAudio(profileId, sessionId, buffer)) {
       return res.json({
         score: null,
         passed: false,
@@ -2633,7 +2655,67 @@ test('安全 18：同一段录音重复提交不重复计数（M 次必须是 M 
   await dropProfile(pid);
 });
 
-test('安全 19：评测没配好或配置不当，启动就失败（纯函数）', async () => {
+test('安全 19：重复提交"没通过"的录音，也不会重复累计失败次数', async () => {
+  const pid = await newProfile('重复失败录音测试');
+  const sid = SID();
+  await bindAndType(pid, sid, 'happy');
+  const bad = Buffer.alloc(2000, 3).toString('base64');
+  // 同一段低分录音提交 4 次：只算 1 次失败（否则回放就能刷够"求助通关"）
+  for (let i = 0; i < 4; i++) {
+    const r = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'happy', sessionId: sid, audioBase64: bad, mockScore: 5 } });
+    assert.equal(r.status, 200);
+    if (i > 0) assert.equal(r.data.error, 'duplicate_audio');
+  }
+  const row = userDb.prepare('SELECT read_fail FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(pid, sid);
+  assert.equal(row.read_fail, 1);
+  // 因此也拿不到求助通关
+  assert.equal((await call('/api/help', { method: 'POST', profile: pid, body: { word: 'happy', sessionId: sid } })).status, 403);
+  await dropProfile(pid);
+});
+
+test('安全 20：指纹记满后是"丢最早的"，不是全清（否则交够 N 段就能重放最早那段）', async () => {
+  const pid = await newProfile('指纹淘汰测试', 'middle');
+  const sid = SID();
+  await bindAndType(pid, sid, 'friend');
+  const oldest = Buffer.alloc(2000, 11).toString('base64');
+  const first = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'friend', sessionId: sid, audioBase64: oldest, mockScore: 95 } });
+  assert.equal(first.data.passed, true);
+  // 再交 70 段各不相同的录音（远超每个会话 64 个指纹的上限）
+  for (let i = 0; i < 70; i++) {
+    const audio = Buffer.alloc(1200 + i, i % 251).toString('base64');
+    await call('/api/score', { method: 'POST', profile: pid, body: { word: 'friend', sessionId: sid, audioBase64: audio, mockScore: 95 } });
+  }
+  // 最近的那段仍然被记得 → 证明是"先进先出地丢最早的"，而不是"记满就全清"
+  const recent = Buffer.alloc(1200 + 69, 69 % 251).toString('base64');
+  const again = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'friend', sessionId: sid, audioBase64: recent, mockScore: 95 } });
+  assert.equal(again.data.error, 'duplicate_audio');
+  // 最早那段因为超出上限被淘汰（这是有意为之：内存必须有界）——它会被当成一段新录音
+  const oldestAgain = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'friend', sessionId: sid, audioBase64: oldest, mockScore: 95 } });
+  assert.notEqual(oldestAgain.data.error, 'duplicate_audio');
+  await dropProfile(pid);
+});
+
+test('安全 21：判重不会误伤正常使用——换一段新录音照常计数，且重复时不计入失败', async () => {
+  const pid = await newProfile('判重不误伤测试', 'middle');
+  const sid = SID();
+  await bindAndType(pid, sid, 'sister');
+  const a = Buffer.alloc(1500, 21).toString('base64');
+  const b = Buffer.alloc(1500, 22).toString('base64');
+  const r1 = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sister', sessionId: sid, audioBase64: a, mockScore: 95 } });
+  assert.equal(r1.data.passes, 1);
+  const dup = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sister', sessionId: sid, audioBase64: a, mockScore: 95 } });
+  assert.equal(dup.data.error, 'duplicate_audio');
+  assert.equal(dup.data.retry, true); // 提示重念，不算失败
+  const r2 = await call('/api/score', { method: 'POST', profile: pid, body: { word: 'sister', sessionId: sid, audioBase64: b, mockScore: 95 } });
+  assert.equal(r2.data.passed, true);
+  assert.equal(r2.data.passes, 2); // 新录音照常计数
+  const row = userDb.prepare('SELECT read_pass, read_fail FROM learn_sessions WHERE profile_id = ? AND session_id = ?').get(pid, sid);
+  assert.equal(row.read_pass, 2);
+  assert.equal(row.read_fail, 0); // 判重没有被算成失败
+  await dropProfile(pid);
+});
+
+test('安全 22：评测没配好或配置不当，启动就失败（纯函数）', async () => {
   const { scorerConfigProblem } = await import('../server/app.js');
   const KEYS = ['XUNFEI_APP_ID', 'XUNFEI_API_KEY', 'XUNFEI_API_SECRET'];
   const saved = { SCORER: process.env.SCORER, WORDLOCK_DEV: process.env.WORDLOCK_DEV };

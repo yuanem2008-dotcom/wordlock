@@ -19,17 +19,36 @@ const CALIBRATION_MIN_SAMPLES = 2;
 const CALIBRATION_CLAMP = [50, 75];
 
 // 防"回放同一段录音"：产品的 M 次本意是"读 M 遍"，不是"同一遍提交 M 次"。
-// 同一个会话里重复提交字节完全相同的音频不重复计数（只记最近几段，避免内存增长；
-// 进程重启后重新计数 —— 这只影响"同一秒内反复回放"的场景，不影响正常使用）。
-const audioFingerprints = new Map();
+// 同一个会话里重复提交字节完全相同的音频不重复计入（通过和没通过都不重复计）。
+//
+// 两个容易写错的地方，别再改回去：
+//   1. 记满之后必须**先进先出地丢掉最早的**，不能 `clear()` 全清 ——
+//      全清等于"交够 N 段不同的录音，最早那段就被忘掉、可以再重放一次"。
+//   2. 判重必须对**通过和失败都生效**，不能只在通过时判 ——
+//      否则回放一段"没通过"的录音可以刷够 read_fail，白拿"求助通关"。
+//
+// 内存有两层上限：每个会话最多记 MAX_PER_SESSION 个指纹（超出丢最早的），
+// 最多记 MAX_SESSIONS 个会话（超出丢最早进表的）；进程重启即清空。
+const MAX_FINGERPRINTS_PER_SESSION = 64;
+const MAX_SESSIONS = 200;
+const audioFingerprints = new Map(); // key → string[]（按时间顺序）
+
 function isRepeatedAudio(profileId, sessionId, buffer) {
   const key = `${profileId}:${sessionId}`;
   const hash = crypto.createHash('sha1').update(buffer).digest('hex');
-  const seen = audioFingerprints.get(key) ?? new Set();
-  if (seen.has(hash)) return true;
-  seen.add(hash);
-  if (seen.size > 8) seen.clear();
-  audioFingerprints.set(key, seen);
+
+  let seen = audioFingerprints.get(key);
+  if (!seen) {
+    seen = [];
+    audioFingerprints.set(key, seen);
+    if (audioFingerprints.size > MAX_SESSIONS) {
+      // Map 保持插入顺序：删掉最早进入的那个会话
+      audioFingerprints.delete(audioFingerprints.keys().next().value);
+    }
+  }
+  if (seen.includes(hash)) return true;
+  seen.push(hash);
+  if (seen.length > MAX_FINGERPRINTS_PER_SESSION) seen.shift();
   return false;
 }
 
@@ -123,8 +142,9 @@ export function createScoreRouter(userDb) {
       return res.json({ score: null, passed: false, error: result.error || 'scorer_error', message: outcome.message });
     }
 
-    // 重复提交同一段录音 → 不计入通过次数（也不算失败，提示重念）
-    if (outcome.passed && buffer && isRepeatedAudio(profileId, sessionId, buffer)) {
+    // 重复提交同一段录音 → 通过和没通过都不重复计入（提示重念，不算失败）
+    // 只在"通过"时判重是不够的：回放一段没通过的录音可以刷够 read_fail，白拿求助通关。
+    if (buffer && isRepeatedAudio(profileId, sessionId, buffer)) {
       return res.json({
         score: null,
         passed: false,

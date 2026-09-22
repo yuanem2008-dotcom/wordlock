@@ -39,7 +39,7 @@
 | `public/app.js` | 界面与流程编排（单文件，较长） |
 | `public/tts.js`、`audio-record.js` | 标准读音（男性嗓音优先级）、录音并转 16k/16bit/单声道 WAV |
 | `scripts/build-dict.js` | ECDICT → `dict.db`（含中文反查索引 `zh_index`） |
-| `tests/` | `node:test` 共 125 个（含 19 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
+| `tests/` | `node:test` 共 128 个（含 22 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
 
 ## 不能改坏的硬约束（都是联调/踩坑换来的，改动请连带跑测试）
 
@@ -51,7 +51,7 @@
 - **`public/tts.js` 不能取 `voices[0]`**：macOS 上那是机器人音 Albert，要按候选列表挑饱满男声。
 - 所有用户数据表都带 `profile_id`，请求带 `X-Profile-Id` 头。
 
-### 门槛不可绕过（这七条是核心不变量，改动务必跑安全回归测试）
+### 门槛不可绕过（这九条是核心不变量，改动务必跑安全回归测试）
 
 1. **「输入 N 次」由服务端判定，且从 0 开始数**：`POST /api/session` 只负责绑定目标词
    （服务端自己查词典确认存在），**不给任何次数**；只有 `POST /api/typing` 里服务端比对通过才算一次。
@@ -71,8 +71,13 @@
    由服务端把分数写进 `calibration_samples`、`/api/calibration/finish` 由服务端算平均分
    （有效样本 < 2 个则保留原分数线）。客户端提交的任何分数一律忽略。
 9. **同一段录音重复提交不重复计数**：产品的 M 次是"读 M 遍"，不是"同一遍提交 M 次"。
-   `/api/score` 用音频指纹（内存 Map，进程内，只记最近几段）拦住重复回放，返回
-   `duplicate_audio`（不计入失败、提示重念）。
+   `/api/score` 用音频指纹拦重复回放，返回 `duplicate_audio`（提示重念、不计入失败）。
+   这里有两个**很容易写错、请勿改回去**的点：
+   - 判重必须对**通过和失败都生效**。只在通过时判是不够的：回放一段"没通过"的录音
+     可以刷够 `read_fail`，白拿"求助通关"（那是直接解锁释义）。
+   - 指纹记满之后必须**先进先出地丢最早的**，不能 `clear()` 全清。全清等于
+     "交够若干段不同录音，最早那段就被忘掉、可以再重放一次"。
+   内存两层上限：每会话 64 个指纹、最多 200 个会话；进程重启即清空。
 
 另外：**启动即强检查**——`SCORER=mock` 且没有显式 `WORDLOCK_DEV=1` 时拒绝启动；
 选了 `xunfei`/`tencent` 但密钥缺失也拒绝启动（避免静默变成"随便念都能过"）。
@@ -82,7 +87,7 @@
 ```bash
 npm start              # HTTP（电脑上用；本会话沙箱内不能监听端口）
 npm run start:https    # HTTPS（iPad 用麦克风时需要，先 npm run certs）
-npm test               # 125 个测试（单元 + 进程内集成 + 安全回归）
+npm test               # 128 个测试（单元 + 进程内集成 + 安全回归）
 npm run build-dict     # 由 data/raw 的 ECDICT 重建 data/dict.db（约 35 秒）
 npm run try-scorer     # 用 macOS say 合成人声送真实评测，验证密钥与计分是否正常
 npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（全量源码快照，供外部 AI 审阅）
@@ -100,7 +105,7 @@ npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时�
    失败 5 次后按 30 秒起逐次翻倍锁定，首次设置只允许本机）。
 2. `server/routes/score.js` + `server/scoring-policy.js` + `server/routes/session.js`：
    **门槛与计分还有没有漏洞——孩子能不能绕过？**（这是本项目的核心不变量，
-   `tests/integration.test.js` 末尾那 13 个"安全 N"用例就是它的看门狗）
+   `tests/integration.test.js` 末尾那 22 个"安全 N"用例就是它的看门狗）
 3. `public/state-machine.js`：换词重置、中文入口、待巩固流程的边界情况。
 4. `server/vocab.js`：复习调度（间隔 [1,2,7]、求助通关额外一轮、毕业后不再推送）、日期边界。
 5. `server/routes/parent.js` 的"每周汇总 / 放弃点判定"（需求 2.10：未到 `meaning_shown` 且 10 分钟无新事件即视为放弃）。
