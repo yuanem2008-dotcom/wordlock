@@ -15,6 +15,7 @@ const CLIENT_REPORTABLE = new Set([
   'not_found',
   'cancel',
   'network_error',
+  'read_retry', // 客户端因音量过低/重复录音而没提交给评测：只记录，不授权
   'quick_peek_request', // 只是"点了按钮"的记录；真正的放行看 /api/quick-peek
 ]);
 

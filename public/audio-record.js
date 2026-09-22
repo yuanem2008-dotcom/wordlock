@@ -21,6 +21,7 @@ export function createRecorder() {
   let ctx = null;
   let node = null;
   let workletNode = null;
+  let sink = null; // 增益为 0 的汇点：驱动采集但不出声
   let chunks = [];
   let peak = 0;
   let onVolume = null;
@@ -45,6 +46,15 @@ export function createRecorder() {
     running = true;
     startMs = Date.now();
 
+    // ⚠️ Web Audio 只会"拉动"能通到 destination 的节点。
+    // 采集节点必须先接到 destination，否则它的 process()/onaudioprocess 根本不会被调用，
+    // 结果是一个音频块都收不到、峰值恒为 0，界面永远提示"没听清"（踩过这个坑）。
+    // 但直接把麦克风接到 destination 会从扬声器放出来（iPad 上会啸叫），
+    // 所以中间串一个增益为 0 的节点：能驱动采集，又不出声。
+    sink = ctx.createGain();
+    sink.gain.value = 0;
+    sink.connect(ctx.destination);
+
     let usedWorklet = false;
     try {
       const blobUrl = URL.createObjectURL(new Blob([WORKLET_CODE], { type: 'application/javascript' }));
@@ -53,6 +63,7 @@ export function createRecorder() {
       workletNode = new AudioWorkletNode(ctx, 'capture-processor');
       workletNode.port.onmessage = (e) => handleChunk(e.data);
       source.connect(workletNode);
+      workletNode.connect(sink);
       usedWorklet = true;
     } catch {
       usedWorklet = false;
@@ -61,7 +72,7 @@ export function createRecorder() {
       node = ctx.createScriptProcessor(2048, 1, 1);
       node.onaudioprocess = (e) => handleChunk(e.inputBuffer.getChannelData(0));
       source.connect(node);
-      node.connect(ctx.destination);
+      node.connect(sink);
     }
 
     // 单词最长录 5 秒，超时自动结束（需求 2.3）
@@ -89,6 +100,7 @@ export function createRecorder() {
     try {
       workletNode?.disconnect();
       node?.disconnect();
+      sink?.disconnect();
       stream?.getTracks().forEach((t) => t.stop());
     } catch {}
     const sampleRate = ctx.sampleRate;
@@ -101,7 +113,7 @@ export function createRecorder() {
     const durationSec = merged.length / sampleRate;
     const tooQuiet = peak < 0.012; // 基本没出声：不算失败，提示再念一遍
     const resampled = sampleRate === TARGET_RATE ? merged : resampleLinear(merged, sampleRate, TARGET_RATE);
-    return { wav: encodeWav(resampled, TARGET_RATE), durationSec, tooQuiet, peak };
+    return { wav: encodeWav(resampled, TARGET_RATE), durationSec, tooQuiet, peak, chunks: chunks.length };
   }
 
   return { start, stop, isRunning: () => running };

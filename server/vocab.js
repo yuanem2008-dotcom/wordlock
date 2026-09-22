@@ -13,7 +13,7 @@ export function todayLocal(offsetDays = 0) {
 export function effectiveIntervals(vocabRow, settings) {
   const base = Array.isArray(settings.reviewIntervals) && settings.reviewIntervals.length
     ? settings.reviewIntervals
-    : [1, 2, 7];
+    : [1, 2, 7, 15, 30];
   if (vocabRow?.assisted) return [...base, base[base.length - 1] + 1];
   return base;
 }

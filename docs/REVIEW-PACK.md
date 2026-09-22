@@ -87,7 +87,7 @@
 | `public/app.js` | 界面与流程编排（单文件，较长） |
 | `public/tts.js`、`audio-record.js` | 标准读音（男性嗓音优先级）、录音并转 16k/16bit/单声道 WAV |
 | `scripts/build-dict.js` | ECDICT → `dict.db`（含中文反查索引 `zh_index`） |
-| `tests/` | `node:test` 共 128 个（含 22 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
+| `tests/` | `node:test` 共 132 个（含 22 个安全回归）；集成测试用 `tests/helpers/dispatch.js` **进程内**调 Express（不监听端口） |
 
 ## 不能改坏的硬约束（都是联调/踩坑换来的，改动请连带跑测试）
 
@@ -97,9 +97,12 @@
 - **WAV 取 PCM 必须按 RIFF 块解析**（`extractPcm`），不能写死跳过 44 字节。
 - **前端禁止 `window.confirm/alert/prompt`**：内嵌浏览器与 iPad 会屏蔽系统弹窗（confirm 直接返回 false，操作静默失败）。用应用内的 `askConfirm()` / `toast()`。
 - **`public/tts.js` 不能取 `voices[0]`**：macOS 上那是机器人音 Albert，要按候选列表挑饱满男声。
+- **词的校验/归一化只有一个来源**：`server/word-rules.js`（客户端 `public/state-machine.js` 有等价实现，改一处必须同步另一处）。
+  允许字母与**词间的空格**/连字符/撇号 —— 因为词典里有 `nice day` 这类短语，而**应用给出的候选必须能被孩子输入**
+  （曾出现「候选显示 nice day、输入却永远提示只能输入英文字母」的自相矛盾，用户实测发现）。
 - 所有用户数据表都带 `profile_id`，请求带 `X-Profile-Id` 头。
 
-### 门槛不可绕过（这七条是核心不变量，改动务必跑安全回归测试）
+### 门槛不可绕过（这九条是核心不变量，改动务必跑安全回归测试）
 
 1. **「输入 N 次」由服务端判定，且从 0 开始数**：`POST /api/session` 只负责绑定目标词
    （服务端自己查词典确认存在），**不给任何次数**；只有 `POST /api/typing` 里服务端比对通过才算一次。
@@ -135,7 +138,7 @@
 ```bash
 npm start              # HTTP（电脑上用；本会话沙箱内不能监听端口）
 npm run start:https    # HTTPS（iPad 用麦克风时需要，先 npm run certs）
-npm test               # 128 个测试（单元 + 进程内集成 + 安全回归）
+npm test               # 132 个测试（单元 + 进程内集成 + 安全回归）
 npm run build-dict     # 由 data/raw 的 ECDICT 重建 data/dict.db（约 35 秒）
 npm run try-scorer     # 用 macOS say 合成人声送真实评测，验证密钥与计分是否正常
 npm run review-pack    # 重新生成 docs/REVIEW-PACK.md（全量源码快照，供外部 AI 审阅）
@@ -149,15 +152,38 @@ npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时�
 
 ## 欢迎重点审阅的地方
 
-1. `server/routes/parent.js`：家长 PIN 与令牌机制是否够稳（当前是进程内会话 + 30 分钟空闲过期，
-   失败 5 次后按 30 秒起逐次翻倍锁定，首次设置只允许本机）。
+1. `server/routes/parent.js`：家长 PIN 与令牌机制是否够稳（scrypt 加盐哈希入库；失败 5 次锁定
+   且逐次翻倍；首次设置只允许本机；随机会话令牌 30 分钟空闲过期）。
 2. `server/routes/score.js` + `server/scoring-policy.js` + `server/routes/session.js`：
    **门槛与计分还有没有漏洞——孩子能不能绕过？**（这是本项目的核心不变量，
-   `tests/integration.test.js` 末尾那 13 个"安全 N"用例就是它的看门狗）
+   `tests/integration.test.js` 末尾那 22 个"安全 N"用例就是它的看门狗）
 3. `public/state-machine.js`：换词重置、中文入口、待巩固流程的边界情况。
 4. `server/vocab.js`：复习调度（间隔 [1,2,7]、求助通关额外一轮、毕业后不再推送）、日期边界。
 5. `server/routes/parent.js` 的"每周汇总 / 放弃点判定"（需求 2.10：未到 `meaning_shown` 且 10 分钟无新事件即视为放弃）。
 6. 数据量与性能：词典 337 万词条、中文索引 270 万行，`zh_index` 的 `rank/hot` 分档与查询计划。
+
+## 本机部署现状（2026-09-22 实测）
+
+- **服务由 macOS LaunchAgent 托管**（两个 plist 都在 `~/Library/LaunchAgents/`）：
+  - `com.wilburread.wordlock`：直接跑 `/opt/homebrew/bin/node …/word-lock/server/index.js`
+    （刻意不用 `npm start`，否则 launchd 监管的是 npm 这个壳，KeepAlive 判断会失真）；
+    `WorkingDirectory` 必须是应用目录（要从这里读 `.env` 和 `data/`）。
+  - `com.wilburread.cloudflared`：跑 `~/.cloudflared/cloudflared tunnel --no-autoupdate run dash-mac`。
+  - 两者都是 `RunAtLoad` + `KeepAlive` + `ThrottleInterval 15`，日志在 `~/Library/Logs/`。
+  - 重启：`launchctl kickstart -k gui/501/<label>`；查状态：`launchctl print gui/501/<label>`。
+- **公网入口**：`https://wordlock.wilburread.com` → 本机 3000。TLS 由 Cloudflare 终止，
+  所以本机不需要 HTTPS/证书（`npm run certs` 那套只是局域网备选）。
+- ⚠️ **不要再另外跑 `npm start`**：会抢 3000 端口，让 LaunchAgent 反复重启。
+- ⚠️ **这台机器会杀掉后台进程**：`cmd &` / `nohup` 起的进程在命令返回后会被清掉；
+  要长期存活必须用 `launchctl bootstrap`（进程 `ppid=1`）。所以别指望 `npm start &` 能常驻。
+- **`dash.wilburread.com` 不由这台 Mac 服务**：它由账号里另一条隧道（`wilbur`）在 Windows 机器上提供，
+  本机 8787 端口没有任何进程在听 → config.yml 里那条 dash ingress 实际是**空转配置**。
+  结论：在这台 Mac 上做隧道操作**不会影响 dash**。
+- **启动守卫是有意的**：评测配置不合法（如 `SCORER=mock` 却没设 `WORDLOCK_DEV=1`）时应用会拒绝启动并退出。
+  遇到它反复重启请看 `~/Library/Logs/wordlock.err.log`，不要去改代码或加环境变量绕过检查。
+- **`~/.cloudflared/cert.pem` 里的 API Token 已失效**（`/user/tokens/verify` 报 Invalid，`dns_records` 查询报鉴权错误），
+  但 `tunnel list` / `tunnel info` / `tunnel route dns` 仍可用（走隧道凭据）。
+  以后要新增域名，DNS 记录可能得去 Cloudflare 面板手动加。
 
 ## 背景
 
@@ -175,7 +201,7 @@ npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时�
 
 给两个孩子用的英语查词工具：**只能查词，不能干别的**。每次查词都要"输入 N 次 + 跟读通过"才能看到释义，让每次查词都变成一次学习。
 
-> 评测使用模拟打分（mock），整个流程完全可以玩；等拿到讯飞或腾讯云的密钥后，改 `.env` 一行即可切换真实评分。
+> 跟读评分已接入**讯飞语音评测**（真实打分）；模拟打分仅作开发调试用。
 
 ---
 
@@ -212,13 +238,14 @@ cd ~/Desktop/word-lock && npm start
 
 浏览器打开 **http://localhost:3000**。想换端口：`PORT=3001 npm start`。
 
-5. 跑测试：`npm test`（共 128 个测试：单元测试 + 接口集成测试，含 22 个"门槛不可绕过"的安全回归）。
+5. 跑测试：`npm test`（共 132 个测试：单元测试 + 接口集成测试，含 22 个"门槛不可绕过"的安全回归）。
 
 ## 二、功能总览（按使用场景）
 
 ### 查词
 - **两个入口**：主界面输入框输入英文单词；或直接输入中文（如"苹果"）→ 从候选列表里点选英文词。
 - **门槛**：查任何新词都要先照着书输入 N 次；然后跟读，评测通过 M 次（默认累计制，可改成连续制）。N 和 M 由门槛档位决定（1→1 次、2→2 次、3→3 次），每累计 5 个"有查词记录的日子"自动升一档，最高 3 档。
+- **支持短语**：词典里的 `nice day`、`have a look` 这类带空格的短语也能查、能输入（大小写和多余空格都会自动忽略）。
 - **提示不泄题**：输错只说"字母个数不对，再数一数"或"第 X 个字母再看看"；跟读不过会说"差一点，先听一遍标准读音，再试一次"。全程没有"错误/失败"字眼。
 - **相近词**：连续 2 次输入词典里没有的词，会给出最多 3 个相近词（编辑距离 ≤ 2，常用词优先），点一下就能选用。
 - **首次校准**：每个档案第一次跟读前，先读 3 个简单词（apple、book、water）试试音，自动定一个适合孩子的通过分数线（也可跳过）。可以在家长模式重置。
@@ -330,81 +357,86 @@ cd ~/Desktop/word-lock && npm run try-scorer
 > 开发时想不用麦克风测流程：在 `.env` 里加 `WORDLOCK_DEV=1` 并在浏览器地址后加 `?dev=1`（会出现"模拟评分"滑块）。
 > **注意**：`WORDLOCK_DEV` 只是让自己调试用的开关；不设它、又用着 `SCORER=mock`，服务器会直接拒绝启动。
 
-## 四、iPad 上使用（要用麦克风就必须做这步）
+## 四、在 iPad / 手机上使用
 
-浏览器只在 **HTTPS** 或 **localhost** 下允许用麦克风。iPad 访问电脑属于局域网，所以必须给电脑配一张本地证书。
+### 推荐：公网地址（不用装证书，任何有网的地方都能用）
 
-**前提**：iPad 和电脑连**同一个 Wi-Fi**；服务器跑在电脑上，所以**电脑要开着机、别睡眠**。
+```
+https://wordlock.wilburread.com
+```
 
-### 第 1 步：生成证书（在电脑上做一次）
+- 手机上用 4G/5G、在外面、在学校都能打开（不要求和电脑同一个 Wi-Fi）
+- **不需要装任何证书**（Cloudflare 提供公共可信证书），麦克风直接可用
+- iPad 用 Safari 打开 → 分享 → **添加到主屏幕**，就能像 App 一样全屏使用
+- 第一次点麦克风会问权限 → 选「允许」
+
+**前提**：服务器就是这台 Mac，所以——
+
+| 要保证 | 说明 |
+|---|---|
+| 电脑开着、**不睡眠** | 合盖/睡眠 = 网站打不开（建议插电，并在「设置 → 锁定屏幕」里关掉睡眠） |
+| 电脑能上网 | 跟读评分要连讯飞；隧道也要往外连 |
+| 家里的电和网正常 | 断电断网就都停了 |
+
+### 备用：只在同一个 Wi-Fi 下用（不经过公网）
+
+不想走公网时，也可以用局域网：`npm run certs` 生成证书 → `npm run start:https` 启动 →
+iPad 打开终端打印的 `https://电脑IP:3000`。这条路**要先给 iPad 装根证书**：
+
+1. `mkcert -CAROOT` 看目录 → 里面有 `rootCA.pem`
+2. 隔空投送到 iPad → 点开 → 设置里「安装」
+3. **设置 → 通用 → 关于本机 → 拉到最后「证书信任设置」→ 打开 mkcert 那一项**（不做这步 Safari 会一直提示"不安全"）
+
+> 换了 Wi-Fi 或电脑换了 IP，要重新 `npm run certs`。走隧道那条路就不用管这些。
+
+### 服务平时是怎么跑起来的
+
+已经配好 macOS 的 LaunchAgent（`com.wilburread.wordlock`）：**开机自动启动，崩了自动拉起**，
+所以平时你什么都不用做。
 
 ```bash
-cd ~/Desktop/word-lock && brew install mkcert
+# 看它在不在跑
+launchctl print gui/$(id -u)/com.wilburread.wordlock | head -5
+
+# 出问题时看日志
+tail -20 ~/Library/Logs/wordlock.out.log    # 正常输出
+tail -20 ~/Library/Logs/wordlock.err.log    # 报错看这个
+
+# 重启
+launchctl kickstart -k gui/$(id -u)/com.wilburread.wordlock
 ```
 
-```bash
-cd ~/Desktop/word-lock && npm run certs
-```
+> ⚠️ **不要再另外跑 `npm start`**：会和它抢 3000 端口，导致服务反复重启。
+> 要临时手动启动，先 `launchctl bootout gui/$(id -u)/com.wilburread.wordlock`。
 
-`npm run certs` 会自动找出电脑在局域网里的地址（形如 `192.168.x.x`）写进证书，并告诉你证书放在哪。
+### 强烈建议：给 iPad 加一道"系统层防线"
 
-> 这一步也可能要你输一次 Mac 密码（把本地根证书装进系统信任列表，这样**电脑自己的浏览器**也不会报“不安全”）。
-> 不想输密码就运行 `npm run certs -- --no-install`：证书照样能用，iPad 不受影响，只是电脑浏览器打开 https 会提示一次“不安全”。
->
-> 换了 Wi-Fi、或者路由器给电脑换了新 IP，就重新运行一次 `npm run certs`。
+应用内的门槛挡得住"在这个 App 里偷懒"，但挡不住孩子**退出网页去用别的 App 或网站**。
+配合 iPad 自带的限制功能，才是完整的方案（全部是系统设置，不用装任何东西）：
 
-### 第 2 步：用 HTTPS 启动
+1. **只允许访问指定网站**：iPad → 设置 → 屏幕使用时间 →（设一个家长密码）→
+   **内容和隐私访问限制** 打开 → **内容访问限制** → **网页内容** → **仅允许的网站** →
+   添加 `https://wordlock.wilburread.com`
+   （这样 Safari 里就只能打开这一个网站，其它一律黑屏）
+2. **锁定在单个 App 里**（更彻底）：设置 → 辅助功能 → **引导式访问** 打开 →
+   用的时候打开 WordLock，连按三次顶部按钮（或主屏幕键）启动引导式访问，
+   孩子就被锁在这个页面里，退出需要你的密码
+3. **预防购买/安装**：屏幕使用时间 → iTunes Store 与 App Store 购买 → 按需限制
 
-```bash
-cd ~/Desktop/word-lock && npm run start:https
-```
-
-终端会打印：
-
-```
-WordLock 已启动（HTTPS）
-  这台电脑上打开：https://localhost:3000
-  iPad 上用这个地址：https://192.168.x.x:3000   ← 就是这一行
-```
-
-记下 iPad 那个地址。
-
-> 和 `npm start` 的区别：`npm start` 是 http（电脑上用、iPad 上不能用麦克风）；`npm run start:https` 是 https（iPad 能用麦克风）。
-> 两个不要同时开（会抢同一个端口）。
-
-### 第 3 步：把根证书装到 iPad（每台 iPad 做一次）
-
-1. 在电脑上查看根证书的位置：
-
-```bash
-mkcert -CAROOT
-```
-
-   里面有个文件 `rootCA.pem`。
-2. 把它**隔空投送（AirDrop）**到 iPad（微信发给自己也行）。
-3. iPad 上点开收到的文件 → **设置** → 顶部会出现「已下载描述文件」→ 点「安装」（要输 iPad 密码）。
-4. **关键一步**：**设置 → 通用 → 关于本机 → 拉到最后「证书信任设置」→ 把 mkcert 那一项的开关打开**。不打开这步，Safari 会一直提示"不安全"。
-
-### 第 4 步：在 iPad 上打开
-
-1. iPad 用 **Safari** 打开第 2 步记下的地址，例如 `https://192.168.x.x:3000`
-2. 第一次点麦克风会问权限 → 选「允许」（也许要先去 **设置 → Safari → 麦克风** 打开）
-3. 点 Safari 的**分享按钮 → 添加到主屏幕**，就能像 App 一样全屏使用
-
-> 已经帮你生成好的证书文件在这里（隔空投送的时候用这个）：
-> 位置是 `$(mkcert -CAROOT)/rootCA.pem`（在终端里运行 `mkcert -CAROOT` 就能看到目录）。
+> 菜单名称可能随 iOS 版本略有不同，但都在「屏幕使用时间」里。
 
 ### 遇到问题怎么办
 
 | 现象 | 原因 / 解决 |
 |---|---|
-| Safari 提示"无法验证服务器身份" | 第 3 步的**证书信任设置**没开；或者电脑 IP 变了，重新 `npm run certs` |
-| iPad 打不开这个地址 | ① 两边不在同一个 Wi-Fi ② 电脑防火墙拦了，去 **系统设置 → 网络 → 防火墙** 允许 node 接受连接 ③ 电脑睡眠了 |
-| 电脑上打开提示不安全 | 正常跳过即可；想让电脑也信任，重跑 `npm run certs` 并同意装根证书 |
-| 地址里的 IP 变了 | 路由器重新分配了 IP。重新 `npm run certs` 并重启服务，或让路由器给电脑固定 IP |
-| 只有电脑上用 | 不用做这一节，直接 `npm start` 用 `http://localhost:3000` 就行 |
+| 公网地址打不开 | ① 电脑睡眠了或关机 ② 家里断网 ③ 隧道挂了（看 `~/.cloudflared/tunnel.log`） |
+| 换成局域网也不行 | iPad 和电脑不在同一个 Wi-Fi；或电脑防火墙拦了 node |
+| 提示"无法验证服务器身份"（只在使用备用方案时） | iPad 的「证书信任设置」没打开 |
+| 麦克风没反应 | Safari 里要先允许麦克风；页面必须是 https（隧道地址本身就是 https） |
 
 > 安全提醒：`.env` 和 `certs/` 都已被 git 忽略，证书和密钥不会进仓库。
+> 这个地址是**公开**的：知道网址的人都能打开（应用按需求不设登录，家长 PIN 只保护设置）。
+> 不想让它一直开着，就临时 `launchctl bootout` 停掉，或让 Codex 把隧道那条也停掉。
 
 ## 五、上线前检查清单（给孩子用之前扫一眼）
 
@@ -430,6 +462,12 @@ mkcert -CAROOT
 - 所有用户数据都存在本机 `data/user.db`，不联网、不上传。
 
 ## 八、还没做的（阶段 7，待确认）
+
+- 例句（Tatoeba 开源例句库，先确认许可证）
+- 导入教材单词表（每个档案标记"本学期教材词"，复习和候选排序优先）
+- 音节级发音反馈（指出哪个音节不准）
+- 家长可维护的**屏蔽词表**（337 万词条未做内容过滤；中文反查可能查到不适合小学生的词）
+- 隧道迁移到 LaunchAgent 统一管理（`dash-mac` 现在仍由 launchd 临时任务/看门狗之外的方式托管，见 AGENTS.md）
 
 例句（Tatoeba）、导入教材单词表、音节级发音反馈。真实评测商接入也等你拿到密钥后进行。
 ````
@@ -485,10 +523,10 @@ import {
   MSG_INVALID,
   MSG_LENGTH,
   positionMessage,
-} from './state-machine.js';
-import { unlockTTS, speakWord, listEnglishVoices } from './tts.js';
-import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js';
-import { createRecorder } from './audio-record.js';
+} from './state-machine.js?v=20260922b';
+import { unlockTTS, speakWord, listEnglishVoices } from './tts.js?v=20260922b';
+import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js?v=20260922b';
+import { createRecorder } from './audio-record.js?v=20260922b';
 
 const AVATARS = ['🐱', '🐶', '🦊', '🐼', '🐸', '🦉', '🐳', '🦄'];
 const PRESET_CARDS = [
@@ -1172,6 +1210,12 @@ async function finishRecording() {
   if (result.tooQuiet) {
     showFeedback('没听清，靠近一点再念一遍', false, 'feedback-reading');
     state.reading.recordError();
+    // 记一条诊断事件（不授予任何权限）：万一以后又出现"总是没听清"，
+    // 家长模式/数据库里能看出是"音量太低"还是"压根没采集到音频"
+    logEvents(
+      [{ type: 'read_retry', word: state.targetWord, detail: { reason: 'too_quiet', peak: result.peak, chunks: result.chunks } }],
+      { step: 'reading' }
+    );
     return;
   }
   await submitScore({ audioBase64: arrayBufferToBase64(result.wav) });
@@ -2225,6 +2269,7 @@ export function createRecorder() {
   let ctx = null;
   let node = null;
   let workletNode = null;
+  let sink = null; // 增益为 0 的汇点：驱动采集但不出声
   let chunks = [];
   let peak = 0;
   let onVolume = null;
@@ -2249,6 +2294,15 @@ export function createRecorder() {
     running = true;
     startMs = Date.now();
 
+    // ⚠️ Web Audio 只会"拉动"能通到 destination 的节点。
+    // 采集节点必须先接到 destination，否则它的 process()/onaudioprocess 根本不会被调用，
+    // 结果是一个音频块都收不到、峰值恒为 0，界面永远提示"没听清"（踩过这个坑）。
+    // 但直接把麦克风接到 destination 会从扬声器放出来（iPad 上会啸叫），
+    // 所以中间串一个增益为 0 的节点：能驱动采集，又不出声。
+    sink = ctx.createGain();
+    sink.gain.value = 0;
+    sink.connect(ctx.destination);
+
     let usedWorklet = false;
     try {
       const blobUrl = URL.createObjectURL(new Blob([WORKLET_CODE], { type: 'application/javascript' }));
@@ -2257,6 +2311,7 @@ export function createRecorder() {
       workletNode = new AudioWorkletNode(ctx, 'capture-processor');
       workletNode.port.onmessage = (e) => handleChunk(e.data);
       source.connect(workletNode);
+      workletNode.connect(sink);
       usedWorklet = true;
     } catch {
       usedWorklet = false;
@@ -2265,7 +2320,7 @@ export function createRecorder() {
       node = ctx.createScriptProcessor(2048, 1, 1);
       node.onaudioprocess = (e) => handleChunk(e.inputBuffer.getChannelData(0));
       source.connect(node);
-      node.connect(ctx.destination);
+      node.connect(sink);
     }
 
     // 单词最长录 5 秒，超时自动结束（需求 2.3）
@@ -2293,6 +2348,7 @@ export function createRecorder() {
     try {
       workletNode?.disconnect();
       node?.disconnect();
+      sink?.disconnect();
       stream?.getTracks().forEach((t) => t.stop());
     } catch {}
     const sampleRate = ctx.sampleRate;
@@ -2305,7 +2361,7 @@ export function createRecorder() {
     const durationSec = merged.length / sampleRate;
     const tooQuiet = peak < 0.012; // 基本没出声：不算失败，提示再念一遍
     const resampled = sampleRate === TARGET_RATE ? merged : resampleLinear(merged, sampleRate, TARGET_RATE);
-    return { wav: encodeWav(resampled, TARGET_RATE), durationSec, tooQuiet, peak };
+    return { wav: encodeWav(resampled, TARGET_RATE), durationSec, tooQuiet, peak, chunks: chunks.length };
   }
 
   return { start, stop, isRunning: () => running };
@@ -2672,7 +2728,7 @@ export function encodeWav(samples, rate) {
 
     <button id="parent-entry" class="parent-entry" title="家长模式">家长</button>
   </main>
-  <script type="module" src="app.js"></script>
+  <script type="module" src="app.js?v=20260922b"></script>
 </body>
 </html>
 ````
@@ -2782,12 +2838,18 @@ export function positionMessage(position) {
   return `第 ${position} 个字母再看看`;
 }
 
+// 归一化：去首尾空白、转小写、把连续空白折叠成一个空格
+// ⚠️ 必须与 server/word-rules.js 保持一致（那边有同样的实现）
 export function normalizeInput(raw) {
-  return String(raw ?? '').trim().toLowerCase();
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
 }
 
+// 允许英文字母，以及词与词之间的空格/连字符/撇号（词典里有 "nice day"、"well-known"、"don't"）
 export function isValidWordChars(word) {
-  return /^[a-z'-]+$/.test(word);
+  return /^[a-z]+(?:[ '-][a-z]+)*$/.test(word);
 }
 
 // 一个查词流程的输入阶段。生命周期：
@@ -4242,6 +4304,7 @@ const outFile = path.join(root, 'docs', 'SECURITY-REVIEW.md');
 
 // 与「孩子能不能绕过门槛」直接相关的文件，按阅读顺序
 const FILES = [
+  'server/word-rules.js',
   'server/sessions.js',
   'server/routes/session.js',
   'server/routes/events.js',
@@ -4292,13 +4355,16 @@ const header = `# WordLock —— 安全审阅包（门槛是否可被绕过）
 4. **快速查看只免除"跟读"，不免除"输入"**：\`/api/quick-peek\` 要求 \`session.typing_count >= 1\`，
    **中英文入口都要求**（否则声明 \`mode='zh'\` 就能绕过）。它直接返回释义、不走 \`/api/meaning\`，
    所以这条判断必须写在它自己里面。
-5. \`/api/events\` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
-6. 求助通关由服务端判定：\`POST /api/help\` 内部查 \`learn_sessions.read_fail >= helpAfterFails\`。
-7. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
-8. **同一段录音重复提交不重复计数**（\`/api/score\` 的音频指纹），返回 \`duplicate_audio\`。
+5. **词的校验与归一化只有一个来源**：\`server/word-rules.js\`（客户端 \`public/state-machine.js\` 有等价实现，改一处要同步另一处）。
+   允许字母与词间的空格/连字符/撇号（词典里有 \`nice day\` 这类短语）——**应用给出的候选必须能被孩子输入**，
+   否则会出现「候选里显示 nice day、但输入时永远提示只能输入英文字母」这种自相矛盾。
+6. \`/api/events\` **只记录、绝不授权**（它接收前端上报，不得改变任何放行状态）。
+7. 求助通关由服务端判定：\`POST /api/help\` 内部查 \`learn_sessions.read_fail >= helpAfterFails\`。
+8. 校准分数线只由服务端算：客户端提交的任何分数一律忽略；有效样本 < 2 个则保留原分数线。
+9. **同一段录音重复提交不重复计数**（\`/api/score\` 的音频指纹），返回 \`duplicate_audio\`。
    注意两个易错点：判重对**通过和失败都生效**（否则回放失败的录音可刷够 read_fail 白拿求助通关）；
    指纹记满是**先进先出丢最早的**，不是 clear() 全清（否则交够若干段就能重放最早那段）。
-9. 启动强检查：\`SCORER=mock\` 且没有 \`WORDLOCK_DEV=1\` → 拒绝启动；密钥缺失 → 拒绝启动
+10. 启动强检查：\`SCORER=mock\` 且没有 \`WORDLOCK_DEV=1\` → 拒绝启动；密钥缺失 → 拒绝启动
    （检查在 \`boot()\` 里，任何入口点都绕不过去）。
 
 > ⚠️ 注意：\`server/sessions.js\`（状态层，提供状态函数）与 \`server/routes/session.js\`
@@ -4326,7 +4392,7 @@ const header = `# WordLock —— 安全审阅包（门槛是否可被绕过）
 
 ## 测试
 
-仓库共 128 个测试（其中 22 个标着「安全 N」）；其中 \`tests/integration.test.js\` 末尾有一组标着「安全 N」的回归用例，
+仓库共 132 个测试（其中 22 个标着「安全 N」）；其中 \`tests/integration.test.js\` 末尾有一组标着「安全 N」的回归用例，
 每一条都对应一个曾经**真实存在且已实测复现**的绕过路径。
 `;
 
@@ -4718,7 +4784,14 @@ export function scorerConfigProblem() {
 export function createApp({ userDb, dictDb }) {
   const app = express();
   app.use(express.json({ limit: '8mb' }));
-  app.use(express.static(path.join(__dirname, '..', 'public')));
+  // 静态文件带 no-store：否则 Cloudflare 会给 .js/.css 套上 4 小时的边缘缓存，
+  // 出现「服务器代码已更新、孩子那边还在跑旧版本」的怪现象（实测踩过：改了校验规则，
+  // iPad 上仍然报旧提示）。这个应用很小，每次重新取一遍毫无压力。
+  app.use(
+    express.static(path.join(__dirname, '..', 'public'), {
+      setHeaders: (res) => res.setHeader('Cache-Control', 'no-store'),
+    })
+  );
 
   const requireProfile = createProfileMiddleware(userDb);
   app.use('/api', createProfileRouter(userDb, requireProfile));
@@ -5031,7 +5104,7 @@ export const PRESETS = {
     reviewPerDay: 3,
     accent: 'en-US',
     dailyLookupLimit: 0,
-    reviewIntervals: [1, 2, 7],
+    reviewIntervals: [1, 2, 7, 15, 30],
     readingMode: 'cumulative',
     streakTolerance: 1,
     soundEnabled: true,
@@ -5051,7 +5124,7 @@ export const PRESETS = {
     reviewPerDay: 5,
     accent: 'en-US',
     dailyLookupLimit: 0,
-    reviewIntervals: [1, 2, 7],
+    reviewIntervals: [1, 2, 7, 15, 30],
     readingMode: 'cumulative',
     streakTolerance: 1,
     soundEnabled: true,
@@ -5270,6 +5343,7 @@ import { Router } from 'express';
 import { findSuggestions } from '../suggest.js';
 import { searchZh } from '../zh-search.js';
 import { getSession, sessionUnlocksPronunciation } from '../sessions.js';
+import { WORD_RE, normalizeWord } from '../word-rules.js';
 import { getLearnedWord } from '../vocab.js';
 import { getProfileBundle } from '../settings.js';
 import { lookupLimitState } from '../limits.js';
@@ -5277,11 +5351,7 @@ import { lookupLimitState } from '../limits.js';
 export function createDictRouter({ getDictDb, userDb }) {
   const router = Router();
 
-  const WORD_RE = /^[a-z'-]+$/;
-
-  function normalize(raw) {
-    return String(raw ?? '').trim().toLowerCase();
-  }
+  const normalize = normalizeWord;
 
   function lookup(db, wordLower) {
     return db
@@ -5382,6 +5452,7 @@ const CLIENT_REPORTABLE = new Set([
   'not_found',
   'cancel',
   'network_error',
+  'read_retry', // 客户端因音量过低/重复录音而没提交给评测：只记录，不授权
   'quick_peek_request', // 只是"点了按钮"的记录；真正的放行看 /api/quick-peek
 ]);
 
@@ -6095,11 +6166,11 @@ export function createScoreRouter(userDb) {
 
 import { Router } from 'express';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
+import { WORD_RE, normalizeWord } from '../word-rules.js';
 import { createSession, getSession, recordTypingSuccess } from '../sessions.js';
 
-const WORD_RE = /^[a-z'-]+$/;
+const normalize = normalizeWord;
 
-const normalize = (s) => String(s ?? '').trim().toLowerCase();
 
 // 输了但不对时，只告诉孩子「第几个字母再看看」——不泄露正确字母（需求 2.1）
 export function hintFor(typed, target) {
@@ -6207,6 +6278,7 @@ export function createSessionRouter(userDb, getDictDb) {
 import { Router } from 'express';
 import { getProfileBundle, LEVEL_COUNTS } from '../settings.js';
 import { getSession, markMeaningShown, sessionUnlocksMeaning } from '../sessions.js';
+import { normalizeWord as normalizeWordShared } from '../word-rules.js';
 import {
   getVocabWord,
   getLearnedWord,
@@ -6217,9 +6289,8 @@ import {
   graduateWord,
 } from '../vocab.js';
 
-function normalizeWord(raw) {
-  return String(raw ?? '').trim().toLowerCase();
-}
+// 与会话/词典用同一套归一化（含空格折叠），否则门禁比对会错位
+const normalizeWord = normalizeWordShared;
 
 function translationLines(dictDb, word, maxLines) {
   const row = dictDb
@@ -6646,12 +6717,14 @@ export function buildExamText(word, category = 'read_word') {
 }
 
 function businessFor(cmd, word, aus) {
+  // 含空格的短语（"nice day"）用句子模式：单词模式下讯飞评不准，且试题标记不同
+  const category = /\s/.test(word) ? 'read_sentence' : 'read_word';
   const business = {
     sub: 'ise',
     ent: 'en_vip',           // 英文评测
-    category: 'read_word',   // 单词模式：孩子读一个单词
+    category,
     cmd,
-    text: buildExamText(word),
+    text: buildExamText(word, category),
     tte: 'utf-8',
     ttp_skip: true,          // 跳过文本上传阶段
     aue: 'raw',              // 裸 PCM
@@ -7082,7 +7155,7 @@ export function todayLocal(offsetDays = 0) {
 export function effectiveIntervals(vocabRow, settings) {
   const base = Array.isArray(settings.reviewIntervals) && settings.reviewIntervals.length
     ? settings.reviewIntervals
-    : [1, 2, 7];
+    : [1, 2, 7, 15, 30];
   if (vocabRow?.assisted) return [...base, base[base.length - 1] + 1];
   return base;
 }
@@ -7199,6 +7272,36 @@ export function pendingWords(userDb, profileId) {
 
 ---
 
+## 📄 server/word-rules.js
+
+````js
+// 「一个合法的目标词长什么样」的唯一来源。
+//
+// 为什么要集中在一处：会话绑定的词、输入校验的词、词典查询的词，三者必须用**同一套归一化**，
+// 否则会出现"存的是 A、比的是 B"这类门禁漏洞；而且客户端 state-machine.js 里有一份等价实现，
+// 改这里时请同步改那边（有单元测试分别覆盖两者）。
+//
+// 允许：英文字母，以及**词与词之间的**空格 / 连字符 / 撇号（词典里有 "nice day"、"well-known"、"don't"）。
+// 不允许：首尾是分隔符、连续分隔符、数字、汉字等其它字符。
+
+export const WORD_RE = /^[a-z]+(?:[ '-][a-z]+)*$/;
+
+// 归一化：去首尾空白、转小写、把连续空白折叠成一个空格
+export function normalizeWord(raw) {
+  return String(raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, ' ');
+}
+
+export function isValidWord(word) {
+  return WORD_RE.test(word);
+}
+````
+
+
+---
+
 ## 📄 server/zh-search.js
 
 ````js
@@ -7290,6 +7393,59 @@ function compare(a, b) {
   if (a.frq !== b.frq) return a.frq - b.frq;
   return a.word < b.word ? -1 : a.word > b.word ? 1 : 0;
 }
+````
+
+
+---
+
+## 📄 tests/audio-record.test.js
+
+````js
+// 录音格式的单元测试：讯飞对音频格式很挑（16k/16bit/单声道），
+// 这里守住 WAV 头不要写错——错了会表现为"孩子念了却总是没听清"。
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { encodeWav } from '../public/audio-record.js';
+
+function readAscii(view, offset, len) {
+  let s = '';
+  for (let i = 0; i < len; i++) s += String.fromCharCode(view.getUint8(offset + i));
+  return s;
+}
+
+test('encodeWav：写出标准的 16kHz / 16bit / 单声道 WAV 头', () => {
+  const samples = new Float32Array(1000);
+  const buf = encodeWav(samples, 16000);
+  const view = new DataView(buf);
+
+  assert.equal(readAscii(view, 0, 4), 'RIFF');
+  assert.equal(readAscii(view, 8, 4), 'WAVE');
+  assert.equal(readAscii(view, 12, 4), 'fmt ');
+  assert.equal(readAscii(view, 36, 4), 'data');
+
+  assert.equal(view.getUint16(20, true), 1, 'PCM 格式标记应为 1');
+  assert.equal(view.getUint16(22, true), 1, '应为单声道');
+  assert.equal(view.getUint32(24, true), 16000, '采样率应为 16000');
+  assert.equal(view.getUint16(34, true), 16, '位深应为 16');
+
+  assert.equal(view.getUint32(40, true), samples.length * 2, 'data 段长度 = 样本数 × 2');
+  assert.equal(buf.byteLength, 44 + samples.length * 2);
+  assert.equal(view.getUint32(4, true), 36 + samples.length * 2, 'RIFF 段长度');
+});
+
+test('encodeWav：样本按 16bit 小端写入，且做了削波保护', () => {
+  const samples = new Float32Array([0, 1, -1, 2, -2, 0.5]);
+  const view = new DataView(encodeWav(samples, 16000));
+  const at = (i) => view.getInt16(44 + i * 2, true);
+
+  assert.equal(at(0), 0);
+  assert.equal(at(1), 32767, '最大正值');
+  assert.equal(at(2), -32768, '最小负值');
+  assert.equal(at(3), 32767, '超过 1 的值要被削到上限');
+  assert.equal(at(4), -32768, '低于 -1 的值要被削到下限');
+  assert.ok(Math.abs(at(5) - 16383) <= 1, '0.5 大致对应一半量程');
+});
 ````
 
 
@@ -7876,6 +8032,24 @@ test('生态接口：stats / garden / theme', async () => {
 
 /* ============ 安全回归：这些路径以前真的能绕过门槛 ============ */
 
+test('回归【用户实测发现】：含空格的短语能查、能绑定、能输入通过', async () => {
+  // 曾经的问题：中文入口给出 "nice day" 这样的候选，而输入校验只允许字母/连字符/撇号，
+  // 孩子照抄也永远输不过（一直提示"只能输入英文字母哦"）。
+  const cw = await call('/api/check-word', { method: 'POST', profile: profileA, body: { word: 'nice day' } });
+  assert.equal(cw.data.exists, true); // 英文入口也能查短语
+
+  const zh = await call('/api/search-zh', { method: 'POST', profile: profileA, body: { query: '美好的一天' } });
+  assert.ok(zh.data.results.some((r) => r.word === 'nice day'));
+
+  const sid = SID();
+  const bound = await call('/api/session', { method: 'POST', profile: profileA, body: { sessionId: sid, word: 'nice day', mode: 'zh' } });
+  assert.equal(bound.status, 200);
+  const typed = await call('/api/typing', { method: 'POST', profile: profileA, body: { sessionId: sid, typed: 'Nice   Day ' } });
+  assert.equal(typed.data.ok, true, JSON.stringify(typed.data)); // 大小写/多余空格都能归一化
+  assert.equal(typed.data.done, true);
+  assert.equal((await call('/api/pronunciation/nice%20day', { profile: profileA, session: sid })).status, 200);
+});
+
 test('安全 1：没完成输入就不能跟读（直接调 /api/score 也会被拒）', async () => {
   const r = await call('/api/score', { method: 'POST', profile: profileA, body: { word: 'computer', sessionId: SID(), mockScore: 100 } });
   assert.equal(r.status, 403);
@@ -8257,7 +8431,7 @@ test('小学高年级预设的默认参数（需求 2.5 表格）', () => {
   assert.equal(s.reviewPerDay, 3);
   assert.equal(s.accent, 'en-US');
   assert.equal(s.dailyLookupLimit, 0);
-  assert.deepEqual(s.reviewIntervals, [1, 2, 7]);
+  assert.deepEqual(s.reviewIntervals, [1, 2, 7, 15, 30]);
   assert.equal(s.readingMode, 'cumulative');
   assert.equal(s.streakTolerance, 1);
   assert.equal(s.soundEnabled, true);
@@ -8308,6 +8482,7 @@ import assert from 'node:assert/strict';
 import {
   createTypingSession,
   normalizeInput,
+  isValidWordChars,
   MSG_INVALID,
   MSG_NOT_FOUND,
   MSG_LENGTH,
@@ -8322,6 +8497,33 @@ test('归一化：去首尾空格、转小写', () => {
   assert.equal(normalizeInput('WELL-KNOWN'), 'well-known');
   assert.equal(normalizeInput("DON'T"), "don't");
   assert.equal(normalizeInput('   '), '');
+});
+
+test('归一化：词与词之间可以有空格（词典里有 "nice day" 这类短语）', () => {
+  assert.equal(normalizeInput('  Nice   Day '), 'nice day'); // 连续空格折叠成一个
+  assert.equal(normalizeInput('nice day'), 'nice day');
+});
+
+test('允许的字符：字母、词间空格、连字符、撇号', () => {
+  assert.ok(isValidWordChars('apple'));
+  assert.ok(isValidWordChars('nice day'));
+  assert.ok(isValidWordChars('well-known'));
+  assert.ok(isValidWordChars("don't"));
+  assert.ok(!isValidWordChars('nice  day')); // 连续空格（归一化后不会出现）
+  assert.ok(!isValidWordChars(' nice day')); // 首尾空格
+  assert.ok(!isValidWordChars('nice day '));
+  assert.ok(!isValidWordChars('-nice'));
+  assert.ok(!isValidWordChars('nice-'));
+  assert.ok(!isValidWordChars('苹果')); // 汉字
+  assert.ok(!isValidWordChars('apple1')); // 数字
+});
+
+test('回归：中文入口给出的含空格候选，孩子能照抄输入通过（曾经永远输不过）', () => {
+  const s = createTypingSession({ requiredCount: 1, mode: 'zh', targetVisible: true });
+  s.setTarget('nice day');
+  const r = s.nextInput('Nice  Day '); // 大小写/空格多少都归一化
+  assert.equal(r.status, 'done');
+  assert.equal(r.target, 'nice day');
 });
 
 test('非法字符被拒绝，不计数', () => {
@@ -8573,7 +8775,7 @@ test('findSuggestions：只用首字母+长度筛选后再算距离（构建的�
 
   try {
     const report = await buildDict({ rawDir: fixtureDir, outFile });
-    assert.equal(report.kept, 29); // 全部 29 行都有中文释义
+    assert.equal(report.kept, 30); // 全部 30 行都有中文释义
 
     const db = new Database(outFile, { readonly: true });
     const row = db.prepare('SELECT * FROM dict WHERE word_lower = ?').get('apple');

@@ -7,10 +7,10 @@ import {
   MSG_INVALID,
   MSG_LENGTH,
   positionMessage,
-} from './state-machine.js';
-import { unlockTTS, speakWord, listEnglishVoices } from './tts.js';
-import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js';
-import { createRecorder } from './audio-record.js';
+} from './state-machine.js?v=20260922b';
+import { unlockTTS, speakWord, listEnglishVoices } from './tts.js?v=20260922b';
+import { unlockSFX, playStepSound, playSuccessSound, playGentleSound } from './sfx.js?v=20260922b';
+import { createRecorder } from './audio-record.js?v=20260922b';
 
 const AVATARS = ['🐱', '🐶', '🦊', '🐼', '🐸', '🦉', '🐳', '🦄'];
 const PRESET_CARDS = [
@@ -694,6 +694,12 @@ async function finishRecording() {
   if (result.tooQuiet) {
     showFeedback('没听清，靠近一点再念一遍', false, 'feedback-reading');
     state.reading.recordError();
+    // 记一条诊断事件（不授予任何权限）：万一以后又出现"总是没听清"，
+    // 家长模式/数据库里能看出是"音量太低"还是"压根没采集到音频"
+    logEvents(
+      [{ type: 'read_retry', word: state.targetWord, detail: { reason: 'too_quiet', peak: result.peak, chunks: result.chunks } }],
+      { step: 'reading' }
+    );
     return;
   }
   await submitScore({ audioBase64: arrayBufferToBase64(result.wav) });

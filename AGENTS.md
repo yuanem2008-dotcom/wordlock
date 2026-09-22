@@ -104,8 +104,8 @@ npm run push-github    # 用 GitHub API 推送本仓库（github.com 被墙时�
 
 ## 欢迎重点审阅的地方
 
-1. `server/routes/parent.js`：家长 PIN 与令牌机制是否够稳（当前是进程内会话 + 30 分钟空闲过期，
-   失败 5 次后按 30 秒起逐次翻倍锁定，首次设置只允许本机）。
+1. `server/routes/parent.js`：家长 PIN 与令牌机制是否够稳（scrypt 加盐哈希入库；失败 5 次锁定
+   且逐次翻倍；首次设置只允许本机；随机会话令牌 30 分钟空闲过期）。
 2. `server/routes/score.js` + `server/scoring-policy.js` + `server/routes/session.js`：
    **门槛与计分还有没有漏洞——孩子能不能绕过？**（这是本项目的核心不变量，
    `tests/integration.test.js` 末尾那 22 个"安全 N"用例就是它的看门狗）

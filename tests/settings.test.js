@@ -13,7 +13,7 @@ test('小学高年级预设的默认参数（需求 2.5 表格）', () => {
   assert.equal(s.reviewPerDay, 3);
   assert.equal(s.accent, 'en-US');
   assert.equal(s.dailyLookupLimit, 0);
-  assert.deepEqual(s.reviewIntervals, [1, 2, 7]);
+  assert.deepEqual(s.reviewIntervals, [1, 2, 7, 15, 30]);
   assert.equal(s.readingMode, 'cumulative');
   assert.equal(s.streakTolerance, 1);
   assert.equal(s.soundEnabled, true);
